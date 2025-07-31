@@ -1,0 +1,8 @@
+ccxt
+web3
+python-dotenv
+fastapi
+uvicorn
+redis
+aiohttp
+websockets
