@@ -37,7 +37,7 @@ MIN_VOLUME_USD = 5_000
 POOL_FETCH_LIMIT = 400
 
 # --- Output ---
-OUTPUT_FILENAME = "target_pools_Dex.json"
+OUTPUT_FILENAME = "data/target_pools_Dex.json"
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

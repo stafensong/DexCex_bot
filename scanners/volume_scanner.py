@@ -1,24 +1,30 @@
 import asyncio
 import os
+import sys
 import ccxt.async_support as ccxt
 from dotenv import load_dotenv
 import datetime
 import json
-from dashboard_publisher import publish_message, get_redis_client
 
-# --- Configuration ---
+# --- Path Correction ---
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# --- Import from local modules ---
+from dashboard.publisher import publish_message, get_redis_client
+from config import (
+    VOLUME_THRESHOLD_RATIO,
+    KLINE_INTERVAL,
+    CYCLE_COOLDOWN_SECONDS,
+    ERROR_COOLDOWN_SECONDS,
+    CONCURRENT_REQUEST_LIMIT,
+    TARGET_QUOTE_CURRENCIES,
+    VOLUME_LOG_FILE,
+)
+
+# --- Load sensitive keys directly from .env ---
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
-VOLUME_THRESHOLD_RATIO = 1.5
-KLINE_INTERVAL = '1h'
-CYCLE_COOLDOWN_SECONDS = 600
-ERROR_COOLDOWN_SECONDS = 60 # Cooldown after an error
-CONCURRENT_REQUEST_LIMIT = 100
-TARGET_QUOTE_CURRENCIES = ["USDT", "USDC"]
-DEX_POOLS_FILE = "target_pools_Dex.json"
-# HOT_POOLS_FILE = "hot_pools.json" # No longer used, replaced by Redis
-VOLUME_LOG_FILE = "volume_log.txt"
 
 # ==============================================================================
 # |                           HELPER FUNCTIONS                                 |
@@ -87,17 +93,18 @@ async def main():
 
     try:
         # --- Initialization ---
+        dex_pools_file_path = "data/target_pools_Dex.json"
         try:
-            with open(DEX_POOLS_FILE, 'r') as f:
+            with open(dex_pools_file_path, 'r') as f:
                 dex_pools = json.load(f).get('pools', [])
             if not dex_pools:
-                log_to_volume_file(f"[Fatal Error] No pools in {DEX_POOLS_FILE}. Exiting.")
-                await publish_message('volume_scanner', 'error', {'message': f"No pools found in {DEX_POOLS_FILE}"})
+                log_to_volume_file(f"[Fatal Error] No pools in {dex_pools_file_path}. Exiting.")
+                await publish_message('volume_scanner', 'error', {'message': f"No pools found in {dex_pools_file_path}"})
                 return
-            log_to_volume_file(f"Loaded {len(dex_pools)} pools from {DEX_POOLS_FILE}.")
+            log_to_volume_file(f"Loaded {len(dex_pools)} pools from {dex_pools_file_path}.")
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            log_to_volume_file(f"[Fatal Error] Could not read/parse {DEX_POOLS_FILE}: {e}. Exiting.")
-            await publish_message('volume_scanner', 'error', {'message': f"Could not read or parse {DEX_POOLS_FILE}: {e}"})
+            log_to_volume_file(f"[Fatal Error] Could not read/parse {dex_pools_file_path}: {e}. Exiting.")
+            await publish_message('volume_scanner', 'error', {'message': f"Could not read or parse {dex_pools_file_path}: {e}"})
             return
 
         cex_to_dex_map = build_cex_to_dex_map(dex_pools)
@@ -134,14 +141,12 @@ async def main():
 
                 unique_hot_pools_list = list({p['poolAddress']: p for p in hot_pools}.values())
 
-                # --- Publish to Redis and also set a key for state persistence ---
                 redis_client = await get_redis_client()
                 if redis_client:
                     message = json.dumps(unique_hot_pools_list)
                     await redis_client.set("latest_hot_pools", message)
                     await redis_client.publish("hot_pools_channel", message)
                     log_to_volume_file(f"Published and set {len(unique_hot_pools_list)} hot pools in Redis.")
-                # -----------------------------------------------------------------
 
                 if unique_hot_pools_list:
                     log_to_volume_file(f"Found {len(unique_hot_pools_list)} hot pools. Published to dashboard.")
@@ -160,7 +165,7 @@ async def main():
             except Exception as e:
                 log_to_volume_file(f"[Fatal Error] An unexpected error occurred in the main loop: {e}")
                 await publish_message('volume_scanner', 'error', {'message': str(e)})
-                raise # Re-raise the exception to terminate the program
+                raise
 
     except asyncio.CancelledError:
         log_to_volume_file("--- Scanner task cancelled. ---")

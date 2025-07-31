@@ -23,12 +23,22 @@ HOT_TARGET_CYCLE_COOLDOWN_SECONDS = 5 # Cooldown for hot targets
 DELAY_BETWEEN_TASKS_SECONDS = 1.5 # Delay between starting each pair scan
 
 # --- File-based linking ---
-LOG_FILE = "arbitrage_log.txt"
+LOG_FILE = "data/arbitrage_log.txt"
+VOLUME_LOG_FILE = "data/volume_log.txt"
 
 # --- Redis Configuration ---
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_CHANNEL = "bot_dashboard_channel"
+
+# --- Volume Scanner Configuration ---
+VOLUME_THRESHOLD_RATIO = 1.5
+KLINE_INTERVAL = '1h'
+CYCLE_COOLDOWN_SECONDS = 600 # Cooldown for the volume scanner itself
+ERROR_COOLDOWN_SECONDS = 60 # Cooldown after an error
+CONCURRENT_REQUEST_LIMIT = 100
+TARGET_QUOTE_CURRENCIES = ["USDT", "USDC"]
+
 
 # --- Strategy Specific Thresholds ---
 PROFIT_THRESHOLD_USD = 3.00
