@@ -4,7 +4,7 @@ import ccxt.async_support as ccxt
 from dotenv import load_dotenv
 import datetime
 import json
-from dashboard_publisher import publish_message
+from dashboard_publisher import publish_message, get_redis_client
 
 # --- Configuration ---
 load_dotenv()
@@ -13,10 +13,11 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 VOLUME_THRESHOLD_RATIO = 1.5
 KLINE_INTERVAL = '1h'
 CYCLE_COOLDOWN_SECONDS = 600
+ERROR_COOLDOWN_SECONDS = 60 # Cooldown after an error
 CONCURRENT_REQUEST_LIMIT = 100
 TARGET_QUOTE_CURRENCIES = ["USDT", "USDC"]
 DEX_POOLS_FILE = "target_pools_Dex.json"
-HOT_POOLS_FILE = "hot_pools.json"
+# HOT_POOLS_FILE = "hot_pools.json" # No longer used, replaced by Redis
 VOLUME_LOG_FILE = "volume_log.txt"
 
 # ==============================================================================
@@ -112,43 +113,57 @@ async def main():
         cycle_count = 0
         while True:
             cycle_count += 1
-            log_to_volume_file(f"--- Starting Scan Cycle #{cycle_count} ---")
+            try:
+                log_to_volume_file(f"--- Starting Scan Cycle #{cycle_count} ---")
 
-            semaphore = asyncio.Semaphore(CONCURRENT_REQUEST_LIMIT)
-            async def fetch_with_semaphore(symbol):
-                async with semaphore:
-                    return await fetch_kline_data(exchange, symbol)
+                semaphore = asyncio.Semaphore(CONCURRENT_REQUEST_LIMIT)
+                async def fetch_with_semaphore(symbol):
+                    async with semaphore:
+                        return await fetch_kline_data(exchange, symbol)
 
-            tasks = [fetch_with_semaphore(s) for s in target_symbols]
-            results = await asyncio.gather(*tasks)
-            
-            log_to_volume_file("Scan complete. Analyzing results...")
-            hot_pools = []
-            for res in filter(None, results):
-                if res["prev_volume"] > 0 and res["current_volume"] > (VOLUME_THRESHOLD_RATIO * res["prev_volume"]):
-                    log_to_volume_file(f"[!!] Surge on {res['symbol']} ({res['current_volume'] / res['prev_volume']:.2f}x)")
-                    if res['symbol'] in cex_to_dex_map:
-                        hot_pools.extend(cex_to_dex_map[res['symbol']])
+                tasks = [fetch_with_semaphore(s) for s in target_symbols]
+                results = await asyncio.gather(*tasks)
+                
+                log_to_volume_file("Scan complete. Analyzing results...")
+                hot_pools = []
+                for res in filter(None, results):
+                    if res["prev_volume"] > 0 and res["current_volume"] > (VOLUME_THRESHOLD_RATIO * res["prev_volume"]):
+                        log_to_volume_file(f"[!!] Surge on {res['symbol']} ({res['current_volume'] / res['prev_volume']:.2f}x)")
+                        if res['symbol'] in cex_to_dex_map:
+                            hot_pools.extend(cex_to_dex_map[res['symbol']])
 
-            unique_hot_pools_list = list({p['poolAddress']: p for p in hot_pools}.values())
+                unique_hot_pools_list = list({p['poolAddress']: p for p in hot_pools}.values())
 
-            with open(HOT_POOLS_FILE, 'w') as f:
-                json.dump(unique_hot_pools_list, f, indent=4)
+                # --- Publish to Redis and also set a key for state persistence ---
+                redis_client = await get_redis_client()
+                if redis_client:
+                    message = json.dumps(unique_hot_pools_list)
+                    await redis_client.set("latest_hot_pools", message)
+                    await redis_client.publish("hot_pools_channel", message)
+                    log_to_volume_file(f"Published and set {len(unique_hot_pools_list)} hot pools in Redis.")
+                # -----------------------------------------------------------------
 
-            if unique_hot_pools_list:
-                log_to_volume_file(f"Found {len(unique_hot_pools_list)} hot pools. Published to dashboard.")
-                await publish_message('volume_scanner', 'found_hot_pools', unique_hot_pools_list)
-            else:
-                log_to_volume_file("No significant surges detected.")
+                if unique_hot_pools_list:
+                    log_to_volume_file(f"Found {len(unique_hot_pools_list)} hot pools. Published to dashboard.")
+                    await publish_message('volume_scanner', 'found_hot_pools', unique_hot_pools_list)
+                else:
+                    log_to_volume_file("No significant surges detected.")
 
-            log_to_volume_file(f"--- Cycle #{cycle_count} finished. Cooling down... ---")
-            await asyncio.sleep(CYCLE_COOLDOWN_SECONDS)
+                log_to_volume_file(f"--- Cycle #{cycle_count} finished. Cooling down for {CYCLE_COOLDOWN_SECONDS}s ---")
+                await asyncio.sleep(CYCLE_COOLDOWN_SECONDS)
+
+            except (ccxt.NetworkError, ccxt.ExchangeError) as e:
+                log_to_volume_file(f"[Warning] A network or exchange error occurred in cycle #{cycle_count}: {e}")
+                await publish_message('volume_scanner', 'warning', {'message': f"Scanner network error: {e}"})
+                log_to_volume_file(f"Cooling down for {ERROR_COOLDOWN_SECONDS}s before retrying...")
+                await asyncio.sleep(ERROR_COOLDOWN_SECONDS)
+            except Exception as e:
+                log_to_volume_file(f"[Fatal Error] An unexpected error occurred in the main loop: {e}")
+                await publish_message('volume_scanner', 'error', {'message': str(e)})
+                raise # Re-raise the exception to terminate the program
 
     except asyncio.CancelledError:
         log_to_volume_file("--- Scanner task cancelled. ---")
-    except Exception as e:
-        log_to_volume_file(f"[Fatal Error] An unexpected error occurred: {e}")
-        await publish_message('volume_scanner', 'error', {'message': str(e)})
     finally:
         log_to_volume_file("--- Shutting down scanner ---")
         await publish_message('volume_scanner', 'log', 'Scanner shutting down.')
@@ -164,7 +179,6 @@ if __name__ == "__main__":
     if not API_KEY or not API_SECRET:
         print("[Fatal Error] Please set BINANCE_API_KEY and BINANCE_API_SECRET in your .env file.")
     else:
-
         try:
             asyncio.run(main())
         except KeyboardInterrupt:

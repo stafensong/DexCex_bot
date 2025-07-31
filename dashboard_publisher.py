@@ -1,11 +1,7 @@
 import asyncio
 import json
 import redis.asyncio as redis
-
-# --- Configuration ---
-REDIS_HOST = 'localhost'
-REDIS_PORT = 6379
-REDIS_CHANNEL = "bot_dashboard_channel"
+from config import REDIS_HOST, REDIS_PORT, REDIS_CHANNEL
 
 # --- Redis Connection (Async Lazy Initialization) ---
 _redis_client = None

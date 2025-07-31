@@ -1,78 +1,19 @@
-import ccxt.async_support as ccxt  # Use async version of ccxt
 import time
 import datetime
 import json
 import sys
 import os
-import asyncio  # Import asyncio
+import asyncio
+import redis # Import the top-level redis library for exceptions
+import redis.asyncio as aioredis # Use an alias for the async version
 from web3 import Web3
-from dotenv import load_dotenv
 from abc import ABC, abstractmethod
+import ccxt.async_support as ccxt
 
-# Load environment variables from .env file
-load_dotenv()
-
-# ==============================================================================
-# |                                 CONFIG                                     |
-# ==============================================================================
-
-# --- General Settings ---
-TRADE_VOLUME_USD = 100.00 # Example trade volume for profit calculation
-CEX_TAKER_FEE_RATE = 0.00075
-SLIPPAGE_THRESHOLD_PERCENT = 1.0
-MIN_TVL_USD = 100_000
-LOW_LIQUIDITY_MAX_TRADE_USD = 5_000
-OPTIMAL_SLIPPAGE_TARGET = 0.3
-DEX_SWAP_GAS_USED = 150000
-
-# --- Scanning Speed & Cooldown ---
-NORMAL_CYCLE_COOLDOWN_SECONDS = 60  # Normal cooldown
-HOT_TARGET_CYCLE_COOLDOWN_SECONDS = 5 # Cooldown for hot targets
-DELAY_BETWEEN_TASKS_SECONDS = 1.5 # Delay between starting each pair scan
-
-# --- File-based linking ---
-LOG_FILE = "arbitrage_log.txt"
-
-# --- Strategy Specific Thresholds ---
-PROFIT_THRESHOLD_USD = 3.00
-
-# --- Blacklist for high-competition CEX pairs ---
-CEX_BLACKLIST = {'ETHUSDT', 'BTCUSDT', 'ETHUSDC', 'BTCUSDC', 'TUSDT', 'TUSDC'}
-
-# --- RPC & ABIs ---
-RPC_URLS = {
-    'base': os.getenv('BASE_RPC_URL'),
-    'arbitrum': os.getenv('ARBITRUM_RPC_URL'),
-    'bsc': os.getenv('BSC_RPC_URL'),
-}
-CONTRACT_ADDRESSES = {
-    'uniswap': {
-        'base': {
-            'quoter_v2': '0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a',
-        },
-        'arbitrum': {
-            'quoter_v2': '0x61fFE014bA17989E743c5F6cB21bF9697530B21e',
-        },
-        'bsc': {
-            'quoter_v2': '0x78D78E420Da98ad378D7799bE8f4AF69033EB077',
-        }
-    },
-    'pancakeswap': {
-        'bsc': {
-            'quoter_v2': '0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997',
-        }
-    }
-}
-
-# Load ABIs from files
-with open('./ABI/quoter.json') as f:
-    QUOTER_V2_ABI = json.load(f)
-with open('./ABI/erc20.json') as f:
-    ERC20_DECIMALS_ABI = json.load(f)
-
-# A cache for token decimals
-TOKEN_DECIMALS = {'WETH': 18, 'ETH': 18, 'WBNB': 18, 'BNB': 18, 'USDC': 6, 'USDT': 6, 'DAI': 18}
-STABLECOINS = {"USDC", "USDT", "DAI"}
+# --- Import all configurations from config.py ---
+from config import *
+# --- Import shared functions ---
+from dashboard_publisher import publish_message, get_redis_client
 
 # ==============================================================================
 # |                           LOGGING FUNCTION                                |
@@ -115,29 +56,93 @@ class ArbitrageStrategy(ABC):
             token_contract = self.w3.eth.contract(address=token_address, abi=ERC20_DECIMALS_ABI)
             decimals = token_contract.functions.decimals().call()
             TOKEN_DECIMALS[symbol] = decimals
-            # print(f"[Info] Fetched and cached decimals for {symbol}: {decimals}")
             return decimals
         except Exception as e:
-            # print(f"[Warning] Could not fetch decimals for {symbol}. Defaulting to 18. Error: {e}")
             return 18
 
     async def _get_gas_cost_in_usd(self, cex_exchange):
-        gas_price_wei = self.w3.eth.gas_price
-        
-        if self.chain == 'bsc':
-            gas_token_symbol = 'BNB/USDT'
-            gas_cost_native = self.w3.from_wei(gas_price_wei * DEX_SWAP_GAS_USED, 'ether')
-        else: # Default to ETH-based chains
-            gas_token_symbol = 'ETH/USDT'
-            gas_cost_native = self.w3.from_wei(gas_price_wei * DEX_SWAP_GAS_USED, 'ether')
+        router_address_str = CONTRACT_ADDRESSES.get(self.protocol, {}).get(self.chain, {}).get('router')
+        if not router_address_str:
+            print(f"[Warning] Router address not found for {self.protocol} on {self.chain}. Cannot estimate gas.")
+            return float('inf')
 
+        router_address = self.w3.to_checksum_address(router_address_str)
+        router_contract = self.w3.eth.contract(address=router_address, abi=ROUTER_ABI)
+
+        token0 = self.pool_info['token0']
+        token1 = self.pool_info['token1']
+        
+        estimated_gas_used = 0
+
+        # --- FINAL FIX: Try estimating gas in both directions (0->1 and 1->0) ---
+        # Attempt 1: Simulate swap from token0 to token1
         try:
+            token0_decimals = self._get_token_decimals(token0)
+            amount_in_0 = 10**token0_decimals # Simulate with 1 full token
+            
+            swap_params_0 = {
+                'tokenIn': self.w3.to_checksum_address(token0['address']),
+                'tokenOut': self.w3.to_checksum_address(token1['address']),
+                'fee': self.pool_fee,
+                'recipient': GAS_ESTIMATION_DUMMY_ADDRESS,
+                'deadline': int(time.time()) + 600,
+                'amountIn': amount_in_0,
+                'amountOutMinimum': 0,
+                'sqrtPriceLimitX96': 0
+            }
+            tx_build_0 = router_contract.functions.exactInputSingle(swap_params_0).build_transaction({
+                'from': GAS_ESTIMATION_DUMMY_ADDRESS, 'nonce': 0
+            })
+            estimated_gas_used = await asyncio.to_thread(
+                self.w3.eth.estimate_gas, {'to': router_address, 'data': tx_build_0['data']}
+            )
+        except Exception:
+            # If the first attempt fails, try the other direction
+            try:
+                token1_decimals = self._get_token_decimals(token1)
+                amount_in_1 = 10**token1_decimals # Simulate with 1 full token
+
+                swap_params_1 = {
+                    'tokenIn': self.w3.to_checksum_address(token1['address']),
+                    'tokenOut': self.w3.to_checksum_address(token0['address']),
+                    'fee': self.pool_fee,
+                    'recipient': GAS_ESTIMATION_DUMMY_ADDRESS,
+                    'deadline': int(time.time()) + 600,
+                    'amountIn': amount_in_1,
+                    'amountOutMinimum': 0,
+                    'sqrtPriceLimitX96': 0
+                }
+                tx_build_1 = router_contract.functions.exactInputSingle(swap_params_1).build_transaction({
+                    'from': GAS_ESTIMATION_DUMMY_ADDRESS, 'nonce': 0
+                })
+                estimated_gas_used = await asyncio.to_thread(
+                    self.w3.eth.estimate_gas, {'to': router_address, 'data': tx_build_1['data']}
+                )
+            except Exception as e1:
+                # If both directions fail, log the error and return infinity
+                error_str = str(e1)
+                if 'execution reverted' in error_str and len(error_str) > 120:
+                    error_str = error_str[:120] + "..."
+                print(f"[Warning] Gas estimation failed in both directions for pool {self.pool_info['poolAddress']}. Final error: {error_str}")
+                return float('inf')
+
+        # If we have a successful gas estimate, calculate the cost in USD
+        try:
+            gas_price_wei = self.w3.eth.gas_price
+            
+            if self.chain == 'bsc':
+                gas_token_symbol = 'BNB/USDT'
+                gas_cost_native = self.w3.from_wei(gas_price_wei * estimated_gas_used, 'ether')
+            else: # Default to ETH-based chains
+                gas_token_symbol = 'ETH/USDT'
+                gas_cost_native = self.w3.from_wei(gas_price_wei * estimated_gas_used, 'ether')
+
             ticker = await cex_exchange.fetch_ticker(gas_token_symbol)
             native_token_price_usd = ticker['last']
             return float(gas_cost_native) * native_token_price_usd
         except Exception as e:
-            print(f"[Warning] Could not fetch price for {gas_token_symbol} to calculate gas fee. Error: {e}")
-            return float('inf') # Return a high value to prevent unprofitable trades
+            print(f"[Warning] Could not fetch native token price to calculate gas fee. Error: {e}")
+            return float('inf')
 
     def _get_quote_with_slippage(self, token_in_address, token_out_address, amount_in_wei):
         try:
@@ -161,10 +166,7 @@ class ArbitrageStrategy(ABC):
     async def evaluate(self, cex_exchange):
         pass
 
-# ==============================================================================
-# |               DIRECT USD-BASED STRATEGY (ALT/STABLE)                     |
-# ==============================================================================
-
+# ... (UsdBasedStrategy and AltWethTriangularStrategy classes remain the same) ...
 class UsdBasedStrategy(ArbitrageStrategy):
     def _configure(self):
         token0, token1 = self.pool_info['token0'], self.pool_info['token1']
@@ -223,10 +225,6 @@ class UsdBasedStrategy(ArbitrageStrategy):
 
         return {"profitable": False, "message": "No direct arbitrage opportunity found.", **log_data}
 
-# ==============================================================================
-# |               TRIANGULAR ETH-BASED STRATEGY (ALT/WETH)                   |
-# ==============================================================================
-
 class AltWethTriangularStrategy(ArbitrageStrategy):
     def _configure(self):
         token0, token1 = self.pool_info['token0'], self.pool_info['token1']
@@ -244,7 +242,6 @@ class AltWethTriangularStrategy(ArbitrageStrategy):
         self.config['cex_alt_stable_symbol'] = self.pool_info['cex_symbol']
         stable_coin = self.config['cex_alt_stable_symbol'].split('/')[1]
         
-        # Use BNB for triangular calculation on BSC, otherwise ETH
         cex_base_symbol = 'BNB' if self.chain == 'bsc' else 'ETH'
         self.config['cex_eth_stable_symbol'] = f"{cex_base_symbol}/{stable_coin}"
 
@@ -356,10 +353,7 @@ class V3ArbitrageBot:
                 }
             }
             
-            # Publish the opportunity to the dashboard
             await publish_message('main_bot', 'opportunity_found', opportunity_data)
-
-            # Return a structured dictionary with all necessary data for execution
             return opportunity_data
         return None
 
@@ -415,7 +409,6 @@ async def find_arbitrage_targets(dex_pools: list, exchange: ccxt.Exchange) -> li
         found_cex_symbol = None
         for stable in ['USDT', 'USDC']:
             cex_symbol = f"{on_chain_symbol}/{stable}"
-            # 修正 CEX symbol: WETH -> ETH
             cex_symbol = cex_symbol.replace('WETH', 'ETH')
             
             blacklist_format_symbol = cex_symbol.replace('/', '')
@@ -429,10 +422,60 @@ async def find_arbitrage_targets(dex_pools: list, exchange: ccxt.Exchange) -> li
             
     return arbitrage_targets
 
+async def redis_hot_pool_listener(hot_pools_ref: list, redis_host: str, redis_port: int):
+    """
+    A listener that subscribes to the hot pools channel on Redis
+    and updates the shared list object in-place.
+    This function creates its own dedicated Redis connection.
+    """
+    print("[Info] Starting Redis hot pool listener...")
+    client = None
+    pubsub = None
+    while True: # Add a loop for automatic reconnection
+        try:
+            # Create a new, dedicated client for this subscriber
+            client = aioredis.Redis(host=redis_host, port=redis_port, auto_close_connection_pool=False, decode_responses=True)
+            await client.ping() # Verify connection
+            print("[Info] Redis listener connected successfully with a dedicated client.")
+
+            pubsub = client.pubsub()
+            await pubsub.subscribe("hot_pools_channel")
+            
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=None) # Block until message
+                if message and message.get('type') == 'message':
+                    try:
+                        new_hot_pools = json.loads(message['data'])
+                        # Update the list in-place to ensure the main loop sees the change
+                        hot_pools_ref.clear()
+                        hot_pools_ref.extend(new_hot_pools)
+                        print(f"[Redis Listener] Received and updated {len(new_hot_pools)} hot pools.")
+                        # REMOVED: await publish_message(...) to prevent task crashes
+                    except json.JSONDecodeError:
+                        print("[Error] Could not decode hot pools message from Redis.")
+        except redis.exceptions.ConnectionError as e:
+            print(f"[Error] Redis connection lost in hot pool listener: {e}. Reconnecting in 10 seconds...")
+        except asyncio.CancelledError:
+            print("[Info] Redis listener task cancelled.")
+            break # Exit the loop if cancelled
+        except Exception as e:
+            print(f"[Error] An unexpected error occurred in the hot pool listener: {e}. Reconnecting in 10 seconds...")
+        finally:
+            # Gracefully close the dedicated connection before retrying
+            if pubsub:
+                await pubsub.close()
+            if client:
+                await client.close()
+            print("[Info] Redis listener connection closed.")
+        
+        await asyncio.sleep(10) # Wait before attempting to reconnect
+
+
 async def main():
     DEX_POOLS_FILE = "target_pools_Dex.json"
-    HOT_POOLS_FILE = "hot_pools.json"
     print(f"--- Bootstrapping Arbitrage Bot ---")
+
+    hot_pools_from_redis = []
 
     try:
         with open(DEX_POOLS_FILE, 'r') as f:
@@ -442,9 +485,11 @@ async def main():
         
         print("[Info] Initializing Binance exchange and loading markets...")
         cex_exchange = ccxt.binance()
-        await cex_exchange.load_markets() # Pre-load markets
+        await cex_exchange.load_markets()
         
-        # --- Initial Bot Setup ---
+        # Pass Redis connection details to the listener
+        listener_task = asyncio.create_task(redis_hot_pool_listener(hot_pools_from_redis, REDIS_HOST, 6379))
+        
         all_bots = []
         w3_providers = {chain: Web3(Web3.HTTPProvider(rpc)) for chain, rpc in RPC_URLS.items() if rpc}
         
@@ -472,18 +517,9 @@ async def main():
         while True:
             cycle_num += 1
             
-            # --- Dynamic Hot Pool Loading ---
-            hot_pools = []
-            try:
-                with open(HOT_POOLS_FILE, 'r') as f:
-                    hot_pools = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                pass # It's okay if the file doesn't exist or is empty
-
-            if hot_pools:
+            if hot_pools_from_redis:
                 new_bots_added = 0
-                # Find CEX symbols for the hot pools and add new bots
-                hot_targets_with_cex = await find_arbitrage_targets(hot_pools, cex_exchange)
+                hot_targets_with_cex = await find_arbitrage_targets(hot_pools_from_redis, cex_exchange)
                 
                 for pool in hot_targets_with_cex:
                     if pool['poolAddress'] not in monitored_pools:
@@ -502,13 +538,11 @@ async def main():
                 if new_bots_added > 0:
                      print(f"Total monitored targets now: {len(all_bots)}")
 
-
-            # --- Determine Scan Scope for this Cycle ---
             bots_to_scan = []
             cooldown_this_cycle = NORMAL_CYCLE_COOLDOWN_SECONDS
 
-            if hot_pools:
-                hot_pool_addresses = {p['poolAddress'] for p in hot_pools}
+            if hot_pools_from_redis:
+                hot_pool_addresses = {p['poolAddress'] for p in hot_pools_from_redis}
                 bots_to_scan = [bot for bot in all_bots if bot.pool_info['poolAddress'] in hot_pool_addresses]
                 cooldown_this_cycle = HOT_TARGET_CYCLE_COOLDOWN_SECONDS
                 if bots_to_scan:
@@ -520,7 +554,7 @@ async def main():
 
             cycle_start_message = f"--- Starting Scan Cycle #{cycle_num} for {len(bots_to_scan)} target(s) at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---"
             print(cycle_start_message)
-            if not hot_pools: # Only log full scans
+            if not hot_pools_from_redis:
                 log_to_file(cycle_start_message)
             
             tasks = []
@@ -539,9 +573,14 @@ async def main():
     except (KeyboardInterrupt, SystemExit):
         print("\nExecution stopped by user. Goodbye!")
     finally:
+        if 'listener_task' in locals() and not listener_task.done():
+            listener_task.cancel()
         if 'cex_exchange' in locals() and hasattr(cex_exchange, 'close'):
             await cex_exchange.close()
         sys.exit(0)
 
 if __name__ == "__main__":
+    if not all(os.path.exists(f) for f in ['config.py', 'dashboard_publisher.py']):
+        print("[Fatal Error] Core files `config.py` or `dashboard_publisher.py` not found.")
+        sys.exit(1)
     asyncio.run(main())

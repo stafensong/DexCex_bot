@@ -4,14 +4,46 @@ import redis.asyncio as redis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import uvicorn
+from contextlib import asynccontextmanager
+from config import REDIS_HOST, REDIS_PORT, REDIS_CHANNEL
 
-# --- Configuration ---
-REDIS_HOST = 'localhost'
-REDIS_PORT = 6379
-REDIS_CHANNEL = "bot_dashboard_channel"
+# --- Lifespan Management for Startup/Shutdown ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Manages application startup and shutdown events.
+    Connects to Redis on startup and starts the listener.
+    """
+    print("Server starting up...")
+    redis_client = None
+    pubsub = None
+    try:
+        redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, auto_close_connection_pool=False)
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(REDIS_CHANNEL)
+        print(f"Subscribed to Redis channel: {REDIS_CHANNEL}")
+        # Start the listener as a background task
+        asyncio.create_task(redis_listener(pubsub))
+        
+        # Application is now running
+        yield
+        
+    except Exception as e:
+        print(f"FATAL: Could not connect to Redis on startup. {e}")
+        # In a real app, you might want to exit or handle this more gracefully
+        yield # Still yield to allow the app to run, even if redis fails
+    
+    finally:
+        # This part runs on shutdown
+        print("Server shutting down...")
+        # Clean up Redis connections
+        if pubsub:
+            await pubsub.close()
+        if redis_client:
+            await redis_client.close()
 
 # --- FastAPI Application ---
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 class ConnectionManager:
     """Manages active WebSocket connections."""
@@ -38,9 +70,10 @@ async def redis_listener(pubsub):
     while True:
         try:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message:
-                print(f"Received from Redis: {message['data'].decode()}")
-                await manager.broadcast(message['data'].decode())
+            if message and 'data' in message:
+                decoded_message = message['data'].decode()
+                print(f"Received from Redis: {decoded_message}")
+                await manager.broadcast(decoded_message)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -58,22 +91,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """On server startup, connect to Redis and start the listener task."""
-    print("Server starting up...")
-    try:
-        redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, auto_close_connection_pool=False)
-        pubsub = redis_client.pubsub()
-        await pubsub.subscribe(REDIS_CHANNEL)
-        print(f"Subscribed to Redis channel: {REDIS_CHANNEL}")
-        # Start the listener as a background task
-        asyncio.create_task(redis_listener(pubsub))
-    except Exception as e:
-        print(f"FATAL: Could not connect to Redis on startup. {e}")
-        # In a real app, you might want to exit or handle this more gracefully
         
 @app.get("/", response_class=HTMLResponse)
 async def get():

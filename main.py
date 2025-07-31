@@ -6,25 +6,29 @@ import datetime
 from decimal import Decimal, ROUND_DOWN
 
 import ccxt.async_support as ccxt
-from dotenv import load_dotenv
 from web3 import Web3
 
 # --- 導入專案模組 ---
+# Import shared settings from the new config file
+from config import (
+    RPC_URLS,
+    DELAY_BETWEEN_TASKS_SECONDS,
+    NORMAL_CYCLE_COOLDOWN_SECONDS,
+    HOT_TARGET_CYCLE_COOLDOWN_SECONDS,
+    REDIS_HOST,
+    REDIS_PORT,
+)
+# Import traders and logic
 from cex_binance_trader import CexTrader
 from dex_uniswap_trader import DexTrader
 from CexDex_tri_bot import (
     V3ArbitrageBot,
     get_strategy_for_pool,
     find_arbitrage_targets,
-    RPC_URLS,
-    DELAY_BETWEEN_TASKS_SECONDS,
-    NORMAL_CYCLE_COOLDOWN_SECONDS,
-    HOT_TARGET_CYCLE_COOLDOWN_SECONDS,
-    log_to_file
+    redis_hot_pool_listener,
+    log_to_file,
 )
-from dashboard_publisher import publish_message
-
-load_dotenv()
+from dashboard_publisher import publish_message, get_redis_client
 
 # ==============================================================================
 # |                         模擬交易執行函式                                     |
@@ -165,17 +169,33 @@ async def execute_arbitrage_opportunity(opportunity: dict, cex_trader: CexTrader
         # Publish success message to dashboard
         await publish_message('main_bot', 'trade_executed', opportunity)
 
+
 # ==============================================================================
 # |                                 MAIN                                       |
 # ==============================================================================
 
 async def main():
     DEX_POOLS_FILE = "target_pools_Dex.json"
-    HOT_POOLS_FILE = "hot_pools.json"
     await publish_message('main_bot', 'log', 'Arbitrage Engine starting up...')
     print(f"--- Bootstrapping Arbitrage Execution Engine ---")
 
+    hot_pools_from_redis = []
+    listener_task = None
+    cex_trader = None
+    cex_exchange = None
+
     try:
+        # --- Pre-populate hot pools from Redis on startup ---
+        redis_client_for_get = await get_redis_client()
+        if redis_client_for_get:
+            latest_hot_pools_str = await redis_client_for_get.get("latest_hot_pools")
+            if latest_hot_pools_str:
+                try:
+                    hot_pools_from_redis.extend(json.loads(latest_hot_pools_str))
+                    print(f"[Info] Pre-populated with {len(hot_pools_from_redis)} hot pools from Redis.")
+                except json.JSONDecodeError:
+                    print("[Warning] Could not decode latest hot pools from Redis.")
+        
         print("[Info] Initializing CEX and DEX traders...")
         cex_trader = CexTrader(api_key=os.getenv('BINANCE_API_KEY'), api_secret=os.getenv('BINANCE_API_SECRET'))
         dex_trader = DexTrader(rpc_url_mapping=RPC_URLS, private_key=os.getenv('PRIVATE_KEY'))
@@ -189,6 +209,10 @@ async def main():
             dex_data = json.load(f)
         if not dex_data.get('pools'): 
             raise ValueError("No pools found in DEX pools file.")
+
+        # --- Start the Redis listener as a background task ---
+        # FIX: Pass the required arguments to the listener task
+        listener_task = asyncio.create_task(redis_hot_pool_listener(hot_pools_from_redis, REDIS_HOST, REDIS_PORT))
         
         all_bots = []
         w3_providers = {chain: Web3(Web3.HTTPProvider(rpc)) for chain, rpc in RPC_URLS.items() if rpc}
@@ -218,16 +242,9 @@ async def main():
         while True:
             cycle_num += 1
             
-            hot_pools = []
-            try:
-                with open(HOT_POOLS_FILE, 'r') as f:
-                    hot_pools = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                pass
-
-            if hot_pools:
+            if hot_pools_from_redis:
                 new_bots_added = 0
-                hot_targets_with_cex = await find_arbitrage_targets(hot_pools, cex_exchange)
+                hot_targets_with_cex = await find_arbitrage_targets(hot_pools_from_redis, cex_exchange)
                 
                 for pool in hot_targets_with_cex:
                     if pool['poolAddress'] not in monitored_pools:
@@ -249,8 +266,8 @@ async def main():
             bots_to_scan = []
             cooldown_this_cycle = NORMAL_CYCLE_COOLDOWN_SECONDS
 
-            if hot_pools:
-                hot_pool_addresses = {p['poolAddress'] for p in hot_pools}
+            if hot_pools_from_redis:
+                hot_pool_addresses = {p['poolAddress'] for p in hot_pools_from_redis}
                 bots_to_scan = [bot for bot in all_bots if bot.pool_info['poolAddress'] in hot_pool_addresses]
                 cooldown_this_cycle = HOT_TARGET_CYCLE_COOLDOWN_SECONDS
                 if bots_to_scan:
@@ -285,20 +302,27 @@ async def main():
     except (FileNotFoundError, ValueError, KeyError) as e:
         print(f"\n[Fatal Error] Could not start bot: {e}")
         await publish_message('main_bot', 'error', {'message': f"Could not start bot: {e}"})
+    except Exception as e:
+        print(f"\n[Fatal Error] An unexpected error occurred during startup: {e}")
+        import traceback
+        traceback.print_exc()
+        await publish_message('main_bot', 'error', {'message': f"An unexpected error occurred: {e}"})
     except (KeyboardInterrupt, SystemExit):
         print("\nExecution stopped by user. Goodbye!")
     finally:
         await publish_message('main_bot', 'log', 'Bot shutting down.')
-        if 'cex_exchange' in locals() and hasattr(cex_exchange, 'close'):
-            await cex_exchange.close()
-        if 'cex_trader' in locals() and hasattr(cex_trader, 'close'):
+        if listener_task and not listener_task.done():
+            listener_task.cancel()
+        if cex_trader and hasattr(cex_trader, 'close'):
             await cex_trader.close()
+        if cex_exchange and hasattr(cex_exchange, 'close'):
+            await cex_exchange.close()
         print("Exiting.")
         sys.exit(0)
 
 if __name__ == "__main__":
-    if not all(os.path.exists(f) for f in ['cex_binance_trader.py', 'dex_uniswap_trader.py']):
-        print("[Fatal Error] `cex_binance_trader.py` or `dex_uniswap_trader.py` not found.")
+    if not all(os.path.exists(f) for f in ['config.py', 'cex_binance_trader.py', 'dex_uniswap_trader.py']):
+        print("[Fatal Error] Core files `config.py`, `cex_binance_trader.py` or `dex_uniswap_trader.py` not found.")
         sys.exit(1)
         
     asyncio.run(main())
