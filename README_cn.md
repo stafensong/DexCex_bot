@@ -67,8 +67,8 @@
 
 1.  **克隆儲存庫**
     ```bash
-    git clone <repository-url>
-    cd <repository-directory>
+    git clone https://github.com/ericeric0101/DexCex_bot.git
+    cd DexCex_bot
     ```
 
 2.  **安裝 Redis**

@@ -67,8 +67,8 @@ The system consists of multiple independent but collaborative scripts that excha
 
 1.  **Clone the Repository**
     ```bash
-    git clone <repository-url>
-    cd <repository-directory>
+    git clone https://github.com/ericeric0101/DexCex_bot.git
+    cd DexCex_bot
     ```
 
 2.  **Install Redis**
