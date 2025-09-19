@@ -59,7 +59,7 @@ io.on('connection', (socket) => {
 // 將前端 build 後的靜態檔案放在 public 資料夾
 app.use(express.static(path.join(__dirname, '..', 'frontend', 'build')));
 
-app.get('*', (req, res) => {
+app.get(/^\/(?!api)(?!socket\.io).*/, (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'frontend', 'build', 'index.html'));
 });
 

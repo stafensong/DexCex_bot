@@ -8,8 +8,8 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from loguru import logger
 
-from ..core.config import DexConfig, NetworkConfig, SecretsConfig
-from ..core.types import MarketPair, Quote, DexSwapParams, DexTxReceipt, TokenDetails
+from ..core.config import DexConfig, NetworkConfig, SecretsConfig, TokenDetails
+from ..core.types import MarketPair, Quote, DexSwapParams, DexTxReceipt
 from .dex_base import DexClient
 
 # --- ABI 輔助函數 ---

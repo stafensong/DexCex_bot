@@ -122,6 +122,10 @@ DEX_WALLET_PRIVATE_KEY="0x..."
 python -m src.cli.main paper
 ```
 
+如果機器人長時間沒有打印 [PAPER MODE] 的機會日誌，這可能意味著：
+   * 當前市場上沒有符合您 config/pairs.yaml 中 min_edge_bps 設定的套利機會。您可以嘗試將 min_edge_bps
+     設定為一個非常小的值（例如 0 或 1），以便在測試階段更容易偵測到機會。
+
 ### 回測 (Backtesting)
 
 根據本地的歷史數據 (CSV) 評估策略表現。
