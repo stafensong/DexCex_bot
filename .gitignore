@@ -23,3 +23,6 @@ venv_uniswap_swapper/
 !hot_pools.json
 !token_mapping.json
 !requirements.txt
+
+# Ignore all contents of the data directory used for backtesting
+data/

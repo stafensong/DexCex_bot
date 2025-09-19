@@ -1,0 +1,204 @@
+import asyncio
+import orjson
+import time
+import hmac
+import hashlib
+from decimal import Decimal
+from typing import Optional, Dict, List, AsyncGenerator
+
+import aiohttp
+import websockets
+from loguru import logger
+
+from ..core.config import CexConfig, SecretsConfig
+from ..core.types import MarketPair, Quote
+from .cex_base import CexClient, CexOrder, OrderUpdate
+from ..infra import metrics
+
+class BinanceCexClient(CexClient):
+    def __init__(self, config: CexConfig, secrets: SecretsConfig, pairs: List[MarketPair]):
+        self.config = config
+        self.secrets = secrets
+        self.pairs = pairs
+        self.base_url = config.base_url
+        self.ws_url = config.ws_url
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws_conn: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws_listener_task: Optional[asyncio.Task] = None
+        self.orderbooks: Dict[str, Dict[str, Decimal]] = {p.symbol.replace('/', ''): {'bids': {}, 'asks': {}} for p in self.pairs}
+        self.last_update_ids: Dict[str, int] = {}
+
+    async def connect(self):
+        logger.info("正在連接到 Binance...")
+        self._session = aiohttp.ClientSession(
+            headers={
+                'X-MBX-APIKEY': self.secrets.binance_api_key.get_secret_value()
+            }
+        )
+        # 啟動 WebSocket 監聽任務
+        self._ws_listener_task = asyncio.create_task(self._ws_listener())
+        logger.info("Binance 客戶端已連接並啟動 WebSocket 監聽。")
+
+    async def close(self):
+        if self._ws_listener_task:
+            self._ws_listener_task.cancel()
+        if self._ws_conn:
+            await self._ws_conn.close()
+        if self._session:
+            await self._session.close()
+        logger.info("Binance 連線已關閉。")
+
+    def _get_signature(self, params: dict) -> str:
+        query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+        return hmac.new(self.secrets.binance_api_secret.get_secret_value().encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+
+    async def _ws_listener(self):
+        streams = [f"{p.symbol.replace('/', '').lower()}@depth" for p in self.pairs]
+        url = f"{self.ws_url}/{'/'.join(streams)}"
+        
+        while True:
+            try:
+                async with websockets.connect(url) as ws:
+                    self._ws_conn = ws
+                    logger.info(f"已連接到 Binance WebSocket: {url}")
+                    # 在連接後，為每個交易對同步訂單簿
+                    await self._sync_all_orderbooks()
+
+                    async for message in ws:
+                        data = orjson.loads(message)
+                        if "stream" in data:
+                            await self._handle_ws_message(data['data'])
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning(f"Binance WebSocket 連線關閉: {e}。5 秒後重連...")
+            except Exception as e:
+                logger.error(f"WebSocket 監聽發生錯誤: {e}。5 秒後重連...", exc_info=True)
+            
+            await asyncio.sleep(5)
+
+    async def _sync_all_orderbooks(self):
+        for pair in self.pairs:
+            await self._sync_orderbook(pair)
+
+    async def _sync_orderbook(self, pair: MarketPair):
+        symbol = pair.symbol.replace('/', '')
+        logger.debug(f"正在為 {symbol} 同步訂單簿快照...")
+        if not self._session:
+            raise ConnectionError("Session not initialized.")
+
+        params = {'symbol': symbol, 'limit': 1000}
+        try:
+            async with self._session.get(f"{self.base_url}/api/v3/depth", params=params) as response:
+                response.raise_for_status()
+                data = await response.json(loads=orjson.loads)
+                
+                self.last_update_ids[symbol] = data['lastUpdateId']
+                self.orderbooks[symbol]['bids'] = {Decimal(price): Decimal(qty) for price, qty in data['bids']}
+                self.orderbooks[symbol]['asks'] = {Decimal(price): Decimal(qty) for price, qty in data['asks']}
+                logger.info(f"{symbol} 訂單簿同步完成。LastUpdateId: {data['lastUpdateId']}")
+        except aiohttp.ClientError as e:
+            logger.error(f"獲取 {symbol} 訂單簿快照失敗: {e}")
+
+    async def _handle_ws_message(self, data: dict):
+        if data.get('e') != 'depthUpdate':
+            return
+
+        symbol = data['s']
+        first_update_id = data['U']
+        final_update_id = data['u']
+
+        if symbol not in self.last_update_ids:
+            logger.warning(f"收到 {symbol} 的 WebSocket 更新，但訂單簿尚未同步。")
+            return
+
+        # 根據 Binance 文件，如果 first_update_id > last_update_id + 1，需要重新同步
+        if first_update_id > self.last_update_ids[symbol] + 1:
+            logger.warning(f"{symbol} WebSocket 更新脫節，正在重新同步...")
+            await self._sync_orderbook(next(p for p in self.pairs if p.symbol.replace('/','') == symbol))
+            return
+
+        # 只有當 final_update_id > last_update_id 時才處理更新
+        if final_update_id <= self.last_update_ids[symbol]:
+            return
+
+        # 更新訂單簿
+        for price, qty in data['b']: # Bids
+            p, q = Decimal(price), Decimal(qty)
+            if q == 0:
+                self.orderbooks[symbol]['bids'].pop(p, None)
+            else:
+                self.orderbooks[symbol]['bids'][p] = q
+        
+        for price, qty in data['a']: # Asks
+            p, q = Decimal(price), Decimal(qty)
+            if q == 0:
+                self.orderbooks[symbol]['asks'].pop(p, None)
+            else:
+                self.orderbooks[symbol]['asks'][p] = q
+        
+        self.last_update_ids[symbol] = final_update_id
+
+    async def get_quote(self, pair: MarketPair) -> Optional[Quote]:
+        symbol = pair.symbol.replace('/', '')
+        book = self.orderbooks.get(symbol)
+
+        if not book or not book['bids'] or not book['asks']:
+            logger.warning(f"無法從本地訂單簿獲取 {symbol} 的報價。")
+            return None
+
+        # 找到最佳買賣價
+        best_bid = max(book['bids'].keys())
+        best_ask = min(book['asks'].keys())
+
+        # 為了與 detector 兼容，返回一個包含買賣價的組合報價
+        # 實際應用中，detector 應該能處理分離的買賣報價
+        return Quote(
+            pair=pair,
+            # 這裡的 price 欄位意義不大，因為我們有分離的 bid/ask
+            price=(best_bid + best_ask) / 2,
+            bid_price=best_bid,
+            ask_price=best_ask,
+            bid_size=book['bids'][best_bid],
+            ask_size=book['asks'][best_ask],
+            side="buy", # 佔位
+            size=Decimal(0), # 佔位
+            venue="CEX",
+            timestamp=asyncio.get_running_loop().time()
+        )
+
+    async def create_order(self, order: CexOrder) -> OrderUpdate:
+        if not self._session:
+            raise ConnectionError("Session not initialized.")
+
+        params = {
+            'symbol': order.pair.symbol.replace('/', ''),
+            'side': order.side.upper(),
+            'type': order.type.upper(),
+            'quantity': f"{order.size:.{order.pair.base_precision}f}",
+            'timestamp': int(time.time() * 1000)
+        }
+        if order.type == 'LIMIT':
+            params['price'] = f"{order.price:.{order.pair.quote_precision}f}"
+            params['timeInForce'] = 'GTC'
+
+        params['signature'] = self._get_signature(params)
+        
+        try:
+            async with self._session.post(f"{self.base_url}/api/v3/order", data=params) as response:
+                response.raise_for_status()
+                data = await response.json(loads=orjson.loads)
+                logger.info(f"CEX 訂單已創建: {data}")
+                return OrderUpdate(
+                    order_id=str(data['orderId']),
+                    status=data['status'],
+                    # 注意：市價單的成交價和數量需要從成交回報中獲取
+                    avg_fill_price=Decimal(data.get('price', '0')),
+                    filled_size=Decimal(data.get('executedQty', '0'))
+                )
+        except aiohttp.ClientError as e:
+            logger.error(f"創建 CEX 訂單失敗: {e} - {await response.text()}")
+            raise
+
+    async def cancel_order(self, order_id: str, pair: MarketPair) -> bool:
+        # 待實現: 取消訂單邏輯
+        logger.info(f"模擬取消訂單: {order_id}")
+        return True
