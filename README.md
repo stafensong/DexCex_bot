@@ -1,103 +1,150 @@
-# DEX-CEX 套利機器人 (arbi-bot)
+# DEX-CEX 套利機器人 (ArbiBot)
 
-這是一個基於 Python 的高頻套利機器人，用於在中心化交易所 (CEX) 和去中心化交易所 (DEX) 之間尋找並執行價差套利機會。
+這是一個基於 Python 的高頻套利機器人，旨在偵測並執行中心化交易所 (CEX) 與去中心化交易所 (DEX) 之間的價差套利機會。專案經過了完整的架構審視與重構，專注於低延遲、安全性、可靠性與可擴展性。
 
-**免責聲明：此專案僅供學術研究與技術驗證。高頻交易與套利具有極高的風險，可能導致重大資金損失。您必須自行承擔所有風險，作者不對任何潛在的虧損負責。在投入真實資金前，請務必在測試網和模擬環境中進行充分測試。請遵守您所在地的法律規範與交易所政策。**
+**免責聲明：此專案僅供學術研究與技術驗證。高頻交易與套利具有極高的金融與技術風險，可能導致重大資金損失。您必須自行承擔所有風險，作者不對任何潛在的虧損負責。在投入真實資金前，請務必在測試網和模擬環境中進行充分測試。請嚴格遵守您所在地的法律規範與交易所政策。**
+
+---
 
 ## 核心功能
 
-- **多鏈與多協議支援**: 可設定在不同鏈 (如 Ethereum, Arbitrum, BSC) 和 DEX (如 Uniswap v3, PancakeSwap) 上運作。
-- **低延遲架構**: 以 `asyncio` (uvloop) 為核心，CEX 行情採用 WebSocket 串流，DEX 採用高效的 RPC 查詢。
-- **風險管理**:
-    - **原子化執行與對沖**: 交易執行器確保在任一邊交易失敗時，能立即對沖已成功的另一邊，避免產生裸露風險部位。
-    - **熔斷機制**: 內建多種熔斷條件 (如單筆超額虧損、庫存超限)，自動停止交易。
-    - **額度限制**: 可設定單筆、總計的交易名義額度。
-- **可觀測性**: 透過 Prometheus 導出詳細的性能指標，並以 JSON 格式記錄結構化日誌。
-- **可回測性**: 提供回測框架，可載入歷史數據以評估策略表現。
+- **低延遲架構**: 以 `asyncio` 和 `uvloop` 為核心，CEX 行情採用 WebSocket 串流即時維護本地訂單簿，DEX 採用高效的 RPC 查詢，確保毫秒級的機會偵測能力。
+- **設定檔驅動**: 所有策略、交易對、地址和風險參數均在 `config/` 目錄下的 YAML 檔案中定義，無需修改程式碼即可調整策略。
+- **多鏈/多協議支援**: 架構設計上可輕鬆擴展至不同的鏈 (如 Ethereum, Arbitrum, BSC) 和 DEX 協議。
+- **風險管理與安全**: 
+    - **原子化執行與對沖**: 核心交易執行器 (`Executor`) 具備單邊交易失敗後的自動對沖邏輯，最大限度地避免產生風險敞口。
+    - **金鑰安全**: 使用 `.env` 和 Pydantic 的 `SecretStr` 來管理金鑰，避免在日誌或程式碼中意外洩漏。
+    - **風險參數**: 可自訂單筆名義額度、總倉位上限、熔斷閾值等關鍵風控參數。
+- **多種運行模式**:
+    - **紙上交易 (Paper Trading)**: 連接真實行情進行模擬，驗證數據準確性與策略有效性，但不執行真實交易。
+    - **回測框架 (Backtesting)**: 可載入歷史數據 (CSV)，對策略進行績效評估與參數調優。
+    - **實盤交易 (Live Trading)**: 執行真實交易。
+- **狀態持久化**: 可將倉位、PnL 等狀態保存至檔案，在機器人重啟後能恢復先前狀態，實現不間斷管理。
+- **資產再平衡**: 提供獨立的再平衡指令，可根據設定的目標比例，自動在 CEX 調整資產庫存。
+- **可觀測性**: 透過 Prometheus 導出詳細的性能指標 (延遲、PnL、錯誤計數等)，並以 JSON 格式記錄結構化日誌，便於監控與告警。
 
-## 安裝
+## 系統架構
 
-1.  **前置要求**:
-    *   Python 3.11+
-    *   一個安全的 Ethereum RPC 節點 (例如 Alchemy, Infura)。
-    *   Binance 交易所帳戶及 API 金鑰。
+專案採用了清晰的模組化分層架構，實現了邏輯與基礎設施的分離。
 
-2.  **複製專案**:
-    ```bash
-    git clone <your-repo-url>
-    cd arbi-bot
-    ```
+- **`config/`**: 存放所有使用者可配置的 YAML 檔案。
+- **`data/`**: 用於存放數據檔案，如回測數據集 (`.csv`) 和機器人狀態 (`state.json`)。
+- **`src/core/`**: 定義了專案的核心數據結構 (`types.py`) 和設定模型 (`config.py`)。
+- **`src/infra/`**: 基礎設施層，負責日誌、指標、儲存和外部通訊 (HTTP/WS)。
+- **`src/exchange/`**: 交易所客戶端實現，分為 `cex_base.py` 和 `dex_base.py` 協議，以及 `binance.py` 和 `univ3.py` 的具體實現。
+- **`src/strategy/`**: 策略層，是機器人的「大腦」，包含機會偵測 (`detector.py`)、路由 (`router.py`)、執行 (`executor.py`) 和再平衡 (`rebalancer.py`)。
+- **`src/risk/`**: 風險管理模組，負責交易前的檢查和交易後的状态更新。
+- **`src/cli/`**: 命令列介面 (`main.py`)，是整個應用程式的入口。
+- **`backtest/`**: 回測框架，包含數據集處理 (`datasets.py`) 和模擬器 (`simulator.py`)。
 
-3.  **設定虛擬環境**:
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
+### 數據流
 
-4.  **安裝依賴**:
-    ```bash
-    pip install -r requirements.txt
-    ```
+1.  **行情輸入**: `BinanceCexClient` 透過 WebSocket 維護訂單簿；`UniV3DexClient` 透過 RPC 查詢鏈上報價。
+2.  **機會偵測**: `OpportunityDetector` 不斷比對 CEX 和 DEX 的價格。
+3.  **產生機會**: 當價差超過 `min_edge_bps` 時，創建一個 `Opportunity` 物件。
+4.  **執行交易**: `TransactionExecutor` 接收 `Opportunity`，併發執行 CEX 和 DEX 交易腿，並處理失敗時的對沖。
+5.  **狀態更新**: `ExecutionSummary` 被發送到 `RiskManager`，後者更新倉位和 PnL，並透過 `storage.py` 將狀態持久化。
 
-## 設定
+## 安裝與設定
 
-1.  **環境變數**:
-    複製範例檔案並填入您的金鑰。**此檔案絕不應提交到版本控制中。**
-    ```bash
-    cp .env.example .env
-    ```
-    接著編輯 `.env` 檔案：
-    ```dotenv
-    # Ethereum RPC 節點 URL
-    ETH_RPC_URL="https://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY"
-    ARBITRUM_RPC_URL="https://arb-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY"
-    BSC_RPC_URL="https://bsc-dataseed.binance.org/"
+### 1. 安裝
 
-    # CEX API 金鑰 (僅需現貨交易權限，關閉提幣權限)
-    BINANCE_API_KEY="YOUR_BINANCE_API_KEY"
-    BINANCE_API_SECRET="YOUR_BINANCE_API_SECRET"
+```bash
+# 複製專案
+git clone <your-repo-url>
+cd <your-repo-name>
 
-    # 用於 DEX 交易的錢包私鑰 (建議使用僅為此機器人創建的專用熱錢包)
-    DEX_WALLET_PRIVATE_KEY="0x..."
+# 建立並啟用虛擬環境
+python3 -m venv venv
+source venv/bin/activate
 
-    # (可選) 用於發送告警的 Webhook URL
-    ALERT_WEBHOOK_URL="https://hooks.slack.com/services/..."
-    ```
+# 安裝依賴
+pip install -r requirements.txt
+```
 
-2.  **策略設定**:
-    *   `config/default.yaml`: 全局設定，如網路、DEX/CEX 端點、風險參數等。
-    *   `config/pairs.yaml`: 您想要監控的交易對列表及相關參數。
+### 2. 設定
 
-## 執行
+設定分為三個部分，請依序完成：
 
-本專案提供一個命令列介面 (CLI) 來啟動不同模式。
+#### 第一步：環境變數 (.env)
 
-1.  **實盤交易 (Live Trading)**:
-    ```bash
-    python -m src.cli.main run
-    ```
+這是存放最敏感金鑰的地方。請複製範例檔案並填寫您自己的金鑰。
 
-2.  **紙上交易 (Paper Trading)**:
-    此模式會偵測機會並記錄，但不會實際執行任何交易。
-    ```bash
-    python -m src.cli.main paper
-    ```
+```bash
+cp .env.example .env
+```
 
-3.  **執行資產再平衡**:
-    根據設定的目標比例，在 CEX 上調整資產庫存。
-    ```bash
-    python -m src.cli.main rebalance
-    ```
+接著，編輯 `.env` 檔案：
 
-4.  **回測 (Backtesting)**:
-    ```bash
-    python -m src.cli.main backtest --dataset-path /path/to/your/data.csv
-    ```
+```dotenv
+# 至少提供一個您想交易的鏈的 RPC URL
+ETH_RPC_URL="https://your_ethereum_rpc_url"
+ARBITRUM_RPC_URL="https://your_arbitrum_rpc_url"
+BSC_RPC_URL="https://your_bsc_rpc_url"
 
-## 風險與安全
+# CEX API 金鑰 (請務必只授予現貨交易權限，關閉提幣！)
+BINANCE_API_KEY="YOUR_BINANCE_API_KEY"
+BINANCE_API_SECRET="YOUR_BINANCE_API_SECRET"
 
-請務必閱讀 [SECURITY.md](SECURITY.md) 以了解詳細的安全設置指南，包括金鑰管理、API 權限和日誌脫敏。
+# 用於 DEX 交易的錢包私鑰 (強烈建議使用一個全新的、僅為此機器人設立的專用熱錢包)
+DEX_WALLET_PRIVATE_KEY="0x..."
+```
 
-## 維運
+#### 第二步：通用與交易對設定 (config/default.yaml, config/pairs.yaml)
 
-請參考 [OPERATIONS.md](OPERATIONS.md) 了解部署、監控和故障排查的相關資訊。
+- **`config/default.yaml`**: 設定全局參數，如風險限制、再平衡策略、DEX 的通用合約地址 (Router/Quoter) 等。
+- **`config/pairs.yaml`**: 設定您想要監控的交易對。每個交易對都需要指定 `base` (基礎貨幣), `quote` (報價貨幣), `dex_chain` (該交易對應的 DEX 所在鏈) 等。
+
+#### 第三步：新增鏈或代幣 (config/tokens.yaml)
+
+所有代幣在不同鏈上的地址都在此檔案中統一管理。
+
+- **若要新增一個代幣 (例如 MATIC on Polygon)**:
+  在 `tokens.yaml` 中新增一個 `MATIC` 區塊，並提供它在 `polygon` 鏈上的地址和精度。
+  ```yaml
+  MATIC:
+    polygon:
+      address: "0x..."
+      decimals: 18
+  ```
+
+- **若要為現有代幣新增一條鏈的支援**:
+  在該代幣（如 `USDC`）下，新增鏈的名稱和對應的地址/精度即可。
+
+## 如何執行
+
+本專案提供一個功能豐富的命令列介面 (CLI)。
+
+### 紙上交易 (Paper Trading)
+
+連接真實行情數據進行模擬，驗證數據準確性，但**不執行**任何真實交易。這是上線前最重要的驗證步驟。
+```bash
+python -m src.cli.main paper
+```
+
+### 回測 (Backtesting)
+
+根據本地的歷史數據 (CSV) 評估策略表現。
+```bash
+# 您需要先準備一個符合格式的 a.csv 檔案
+python -m src.cli.main backtest --dataset-path data/your_data.csv
+```
+
+### 資產再平衡 (Rebalancing)
+
+手動觸發一次 CEX 資產庫存檢查與調整。
+```bash
+python -m src.cli.main rebalance
+```
+
+### 實盤交易 (Live Trading)
+
+**風險極高！** 請確保您已完成所有測試，並完全理解程式碼的行為。
+```bash
+python -m src.cli.main run
+```
+
+## 其他文件
+
+- **安全指南**: [SECURITY.md](SECURITY.md)
+- **維運指南**: [OPERATIONS.md](OPERATIONS.md)
