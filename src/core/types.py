@@ -21,6 +21,8 @@ class MarketPair(BaseModel):
     base: str
     quote: str
     symbol: str  # e.g., "ETH/USDT"
+    dex_chain: str
+    dex_pool_fee: int
     base_precision: int = 8
     quote_precision: int = 8
 
@@ -42,6 +44,8 @@ class Opportunity(BaseModel):
     size: Decimal
     cex_price: Decimal
     dex_price: Decimal
+    dex_chain: str
+    dex_pool_fee: int
     edge_bps: Decimal
     slippage_bps: Decimal
     gas_cost_quote: Decimal
@@ -52,13 +56,13 @@ class Opportunity(BaseModel):
 # --- DEX Specific Types ---
 
 class DexSwapParams(BaseModel):
-    token_in: str
-    token_out: str
+    chain: str
+    token_in_address: str
+    token_in_decimals: int
+    token_out_address: str
     fee: int
-    amount_in_wei: int
-    recipient: str
-    deadline: int
-    amount_out_min_wei: int
+    amount_in: Decimal
+    slippage_bps: int
 
 class DexTxReceipt(BaseModel):
     tx_hash: str

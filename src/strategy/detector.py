@@ -31,7 +31,13 @@ class OpportunityDetector:
         """
         檢查單一交易對的 CEX 和 DEX 價格，計算潛在機會。
         """
-        pair = MarketPair(base=pair_config.base, quote=pair_config.quote, symbol=pair_config.cex_symbol)
+        pair = MarketPair(
+            base=pair_config.base, 
+            quote=pair_config.quote, 
+            symbol=pair_config.cex_symbol,
+            dex_chain=pair_config.dex_chain,
+            dex_pool_fee=pair_config.dex_pool_fee
+        )
         
         # 從 CEX 本地訂單簿獲取報價
         cex_quote = await self.cex_client.get_quote(pair)
@@ -99,6 +105,8 @@ class OpportunityDetector:
             size=size,
             cex_price=cex_price,
             dex_price=dex_price,
+            dex_chain=pair_config.dex_chain,
+            dex_pool_fee=pair_config.dex_pool_fee,
             edge_bps=edge_bps,
             slippage_bps=Decimal(pair_config.max_slippage_bps),
             gas_cost_quote=gas_cost,

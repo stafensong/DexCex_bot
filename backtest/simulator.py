@@ -94,7 +94,13 @@ class Simulator:
         
         # 假設回測只針對第一個設定的交易對
         self.pair_config = self.config.pairs[0]
-        self.market_pair = MarketPair(base=self.pair_config.base, quote=self.pair_config.quote, symbol=self.pair_config.cex_symbol)
+        self.market_pair = MarketPair(
+            base=self.pair_config.base, 
+            quote=self.pair_config.quote, 
+            symbol=self.pair_config.cex_symbol,
+            dex_chain=self.pair_config.dex_chain,
+            dex_pool_fee=self.pair_config.dex_pool_fee
+        )
 
         # 初始化模擬客戶端
         self.cex_client = BacktestCexClient(self.market_pair)

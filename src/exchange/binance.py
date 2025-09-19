@@ -198,6 +198,27 @@ class BinanceCexClient(CexClient):
             logger.error(f"創建 CEX 訂單失敗: {e} - {await response.text()}")
             raise
 
+    async def get_balance(self, asset: str) -> Decimal:
+        """查詢特定資產的可用餘額。"""
+        logger.debug(f"正在查詢 CEX 資產 {asset} 的餘額...")
+        params = {
+            'timestamp': int(time.time() * 1000),
+            'recvWindow': self.config.recv_window_ms
+        }
+        params['signature'] = self._get_signature(params)
+        try:
+            async with self._session.get(f"{self.base_url}/api/v3/account", params=params) as response:
+                data = await response.json(loads=orjson.loads)
+                response.raise_for_status()
+                
+                for balance in data['balances']:
+                    if balance['asset'] == asset:
+                        return Decimal(balance['free'])
+                return Decimal("0") # 如果餘額列表中沒有該資產
+        except Exception as e:
+            logger.error(f"查詢 CEX 餘額失敗: {e}")
+            return Decimal("-1") # 返回負值表示查詢出錯
+
     async def cancel_order(self, order_id: str, pair: MarketPair) -> bool:
         # 待實現: 取消訂單邏輯
         logger.info(f"模擬取消訂單: {order_id}")

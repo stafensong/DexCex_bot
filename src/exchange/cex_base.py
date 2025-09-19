@@ -40,6 +40,6 @@ class CexClient(Protocol):
         """
         ...
 
-    # async def get_balance(self, asset: str) -> Decimal:
-    #     """查詢特定資產的餘額。"""
-    #     ...
+    async def get_balance(self, asset: str) -> Decimal:
+        """查詢特定資產的餘額。"""
+        ...

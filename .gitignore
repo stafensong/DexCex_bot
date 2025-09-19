@@ -26,3 +26,5 @@ venv_uniswap_swapper/
 
 # Ignore all contents of the data directory used for backtesting
 data/
+!data/.gitkeep
+state.json

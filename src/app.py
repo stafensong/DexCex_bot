@@ -10,27 +10,40 @@ from .exchange.binance import BinanceCexClient
 from .exchange.univ3 import UniV3DexClient
 from .strategy.detector import OpportunityDetector
 from .strategy.router import SimpleRouter
-from .strategy.executor import TransactionExecutor
+from .strategy.executor import TransactionExecutor, PaperExecutor
 from .risk.limits import RiskManager
 
 # 安裝 uvloop 以提升異步性能
 uvloop.install()
 
 class ArbiBotApp:
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, mode: str = 'live'):
         self.config = config
         self.logger = setup_logging(config.observability)
         self.metrics_server = setup_metrics(config.observability)
         self.running = False
+        self.mode = mode
 
         # 初始化核心組件
-        pairs = [MarketPair(base=p.base, quote=p.quote, symbol=p.cex_symbol) for p in config.pairs]
+        pairs = [MarketPair(
+            base=p.base, 
+            quote=p.quote, 
+            symbol=p.cex_symbol, 
+            dex_chain=p.dex_chain, 
+            dex_pool_fee=p.dex_pool_fee
+        ) for p in config.pairs]
         self.cex_client = BinanceCexClient(config.cex, config.secrets, pairs)
-        self.dex_client = UniV3DexClient(config.dex, config.network, config.secrets)
+        self.dex_client = UniV3DexClient(config.dex, config.network, config.secrets, config.tokens)
         self.risk_manager = RiskManager(config.risk)
-        self.detector = OpportunityDetector(self.cex_client, self.dex_client, self.config.pairs)
+        self.detector = OpportunityDetector(self.cex_client, self.dex_client, config.pairs)
         self.router = SimpleRouter()
-        self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager)
+        
+        # 根據模式選擇執行器
+        if self.mode == 'paper':
+            self.executor = PaperExecutor()
+        else:
+            self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager)
+        self.logger.info(f"應用程式已在 {self.mode.upper()} 模式下初始化。")
 
     async def start(self):
         self.logger.info("機器人啟動中...")

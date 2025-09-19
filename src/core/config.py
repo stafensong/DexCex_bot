@@ -1,7 +1,10 @@
 import os
 import yaml
-from pydantic import BaseModel, Field, SecretStr, field_validator
 from typing import List, Dict, Literal
+
+from pydantic import BaseModel, Field, SecretStr, model_validator
+from dotenv import load_dotenv
+from loguru import logger
 
 # --- Helper function to load YAML with environment variable substitution ---
 def load_yaml_with_env(path: str) -> dict:
@@ -13,22 +16,30 @@ def load_yaml_with_env(path: str) -> dict:
     return yaml.safe_load(expanded_content)
 
 # --- Pydantic Models for Configuration ---
+# All component models must be defined before the main AppConfig model
+
+class TokenDetails(BaseModel):
+    address: str
+    decimals: int
 
 class NetworkConfig(BaseModel):
     default_chain: str
-    rpc_urls: Dict[str, str] = Field(default_factory=dict)
+    rpc_urls: Dict[str, str] = {}
     max_pending_seconds: int
     gas_estimation_chain: str
     priority_fee_gwei: float
     max_fee_gwei: float
 
-    @field_validator('rpc_urls', mode='before')
-    def load_rpc_urls(cls, v):
-        return {
+    @model_validator(mode='after')
+    def load_rpc_urls_from_env(self) -> 'NetworkConfig':
+        raw_urls = {
             "ethereum": os.getenv("ETH_RPC_URL", ""),
             "arbitrum": os.getenv("ARBITRUM_RPC_URL", ""),
             "bsc": os.getenv("BSC_RPC_URL", ""),
         }
+        # 過濾掉值為空的 URL
+        self.rpc_urls = {chain: url for chain, url in raw_urls.items() if url}
+        return self
 
 class DexContracts(BaseModel):
     router: str
@@ -84,12 +95,24 @@ class SecretsConfig(BaseModel):
 
     @classmethod
     def load(cls):
+        api_key = os.getenv("BINANCE_API_KEY", "")
+        api_secret = os.getenv("BINANCE_API_SECRET", "")
+        private_key = os.getenv("DEX_WALLET_PRIVATE_KEY", "")
+
+        if not private_key:
+            raise ValueError("關鍵錯誤：DEX_WALLET_PRIVATE_KEY 未在您的 .env 檔案中設定或值為空。")
+        if not api_key:
+            logger.warning("BINANCE_API_KEY 未設定，CEX 功能將受限。")
+        if not api_secret:
+            logger.warning("BINANCE_API_SECRET 未設定，CEX 功能將受限。")
+
         return cls(
-            binance_api_key=os.getenv("BINANCE_API_KEY", ""),
-            binance_api_secret=os.getenv("BINANCE_API_SECRET", ""),
-            dex_wallet_private_key=os.getenv("DEX_WALLET_PRIVATE_KEY", ""),
+            binance_api_key=api_key,
+            binance_api_secret=api_secret,
+            dex_wallet_private_key=private_key,
         )
 
+# Main AppConfig model
 class AppConfig(BaseModel):
     env: str
     network: NetworkConfig
@@ -99,20 +122,24 @@ class AppConfig(BaseModel):
     inventory: InventoryConfig
     observability: ObservabilityConfig
     pairs: List[PairConfig]
+    tokens: Dict[str, Dict[str, TokenDetails]]
     secrets: SecretsConfig = Field(default_factory=SecretsConfig.load)
 
 
 def load_config(
     default_path: str = "config/default.yaml",
-    pairs_path: str = "config/pairs.yaml"
+    pairs_path: str = "config/pairs.yaml",
+    tokens_path: str = "config/tokens.yaml"
 ) -> AppConfig:
     """Loads configuration from YAML files and environment variables."""
+    load_dotenv()
     # Load YAML files
     default_cfg_data = load_yaml_with_env(default_path)
     pairs_cfg_data = load_yaml_with_env(pairs_path)
+    tokens_cfg_data = load_yaml_with_env(tokens_path)
 
     # Combine data
-    full_config_data = {**default_cfg_data, **pairs_cfg_data}
+    full_config_data = {**default_cfg_data, **pairs_cfg_data, **tokens_cfg_data}
 
     # Parse with Pydantic
     return AppConfig(**full_config_data)

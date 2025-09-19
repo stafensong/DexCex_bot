@@ -93,16 +93,42 @@ class TransactionExecutor:
             raise
 
     async def _execute_dex_leg(self, opp: Opportunity, side: str) -> ExecutionLeg:
-        # 這裡的實作需要根據新的 DexSwapParams 進行大幅調整
-        # 為了讓程式碼能跑通，我們暫時使用一個簡化的模擬
-        logger.warning("DEX 執行邏輯尚未完全適配新的 DexSwapParams，使用模擬執行。")
+        logger.info(f"準備 DEX 交易腿 ({side}) on {opp.dex_chain}...")
         try:
-            # 模擬一個成功的交易
-            price = opp.dex_price
-            fee = price * opp.size * Decimal("0.003") # 模擬 DEX fee
+            # TODO: 這部分應由一個更健壯的 Token Registry 服務來提供
+            # 這裡我們使用一個簡化的硬編碼地址映射
+            token_map = {
+                "WETH": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "decimals": 18},
+                "USDT": {"address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "decimals": 6},
+                "USDC": {"address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "decimals": 6}
+            }
+
+            if side == 'sell': # 賣 base, 買 quote
+                token_in = token_map[opp.pair.base]
+                token_out = token_map[opp.pair.quote]
+                amount_in = opp.size
+            else: # 買 base, 賣 quote
+                token_in = token_map[opp.pair.quote]
+                token_out = token_map[opp.pair.base]
+                # 買入時，我們用報價幣來支付，數量是 CEX 價格 * base 數量
+                amount_in = opp.cex_price * opp.size
+
+            params = DexSwapParams(
+                chain=opp.dex_chain,
+                token_in_address=token_in['address'],
+                token_in_decimals=token_in['decimals'],
+                token_out_address=token_out['address'],
+                fee=opp.dex_pool_fee,
+                amount_in=amount_in,
+                slippage_bps=opp.slippage_bps
+            )
+
+            receipt = await self.dex_client.execute_swap(params)
+            
+            fee = Decimal(receipt.gas_used * receipt.effective_gas_price) / Decimal(1e18) * opp.cex_price # Gas fee in quote currency
             return ExecutionLeg(
-                venue="DEX", side=side, price_quote=price, size=opp.size, 
-                fees_quote=fee, tx_hash=f"0x_sim_{time.time()}"
+                venue="DEX", side=side, price_quote=receipt.avg_fill_price,
+                size=receipt.filled_size, fees_quote=fee, tx_hash=receipt.tx_hash
             )
         except Exception as e:
             metrics.failed_leg.labels(pair=opp.pair.symbol, venue="DEX", reason="execution_error").inc()
@@ -165,3 +191,37 @@ class TransactionExecutor:
 
 class PartialFailureError(Exception):
     pass
+
+
+class PaperExecutor:
+    """
+    一個僅記錄日誌而不執行任何操作的執行器，用於紙上交易模式。
+    """
+    def __init__(self):
+        logger.info("紙上交易執行器初始化。將只記錄機會，不執行交易。")
+
+    async def run(self, opp: Opportunity) -> ExecutionSummary:
+        """
+        模擬執行一個機會，僅打印日誌。
+        """
+        start_ts = time.time()
+        logger.info(f"[PAPER MODE] 偵測到機會，本應執行: {opp.direction} {opp.size:.6f} {opp.pair.base}")
+        logger.info(f"           CEX Price: {opp.cex_price:.4f} | DEX Price: {opp.dex_price:.4f} | PnL: {opp.expected_pnl_quote:.4f}")
+        
+        # 返回一個模擬的成功交易摘要
+        mock_leg = ExecutionLeg(
+            venue="CEX", side="buy", price_quote=opp.cex_price, size=opp.size, fees_quote=opp.cex_fee_quote
+        )
+        return ExecutionSummary(
+            pair=opp.pair,
+            direction=opp.direction,
+            size=opp.size,
+            legs=[mock_leg, mock_leg], # 簡化模擬
+            gas_quote=opp.gas_cost_quote,
+            pnl_quote=opp.expected_pnl_quote,
+            edge_bps=opp.edge_bps,
+            hedged=False,
+            started_ts=start_ts,
+            completed_ts=time.time()
+        )
+
