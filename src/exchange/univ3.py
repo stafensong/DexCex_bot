@@ -52,6 +52,37 @@ class UniV3DexClient(DexClient):
             raise ValueError(f"在 {chain} 上找不到代幣 {symbol} 的地址設定。")
         return self.tokens_config[symbol][chain]
 
+    async def get_balance(self, asset: str, chain: str) -> Decimal:
+        """查詢特定代幣在特定鏈上的錢包餘額。"""
+        w3 = self._get_w3(chain)
+        try:
+            # 對於原生代幣 (e.g., ETH on mainnet)
+            if asset == self.net_config.native_token.get(chain):
+                balance_wei = await asyncio.to_thread(w3.eth.get_balance, self.user_address)
+                balance = Decimal(balance_wei) / Decimal(10**18)
+                logger.debug(f"在 {chain} 上的原生代幣 {asset} 餘額: {balance}")
+                return balance
+
+            # 對於 ERC20 代幣
+            token_details = self._get_token_details(asset, chain)
+            token_address = Web3.to_checksum_address(token_details.address)
+            token_contract = w3.eth.contract(address=token_address, abi=self.erc20_abi)
+            
+            balance_wei = await asyncio.to_thread(
+                token_contract.functions.balanceOf(self.user_address).call
+            )
+            
+            balance = Decimal(balance_wei) / (10**token_details.decimals)
+            logger.debug(f"在 {chain} 上的 {asset} 餘額: {balance}")
+            return balance
+
+        except ValueError as e:
+            logger.error(f"查詢餘額失敗: {e}")
+            return Decimal("-1")
+        except Exception as e:
+            logger.error(f"查詢 {asset} on {chain} 餘額時發生未知錯誤: {e}")
+            return Decimal("-1")
+
     async def get_quote(self, pair: MarketPair, size: Decimal, side: str) -> Optional[Quote]:
         """使用 QuoterV2 合約獲取鏈上報價。"""
         w3 = self._get_w3(pair.dex_chain)

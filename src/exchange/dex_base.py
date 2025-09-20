@@ -31,6 +31,6 @@ class DexClient(Protocol):
         """
         ...
 
-    # async def get_balance(self, asset: str) -> Decimal:
-    #     """查詢特定代幣的錢包餘額。"""
-    #     ...
+    async def get_balance(self, asset: str, chain: str) -> Decimal:
+        """查詢特定代幣在特定鏈上的錢包餘額。"""
+        ...

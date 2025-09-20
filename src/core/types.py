@@ -77,6 +77,7 @@ class CexOrder(BaseModel):
     order_id: str
     pair: "MarketPair"
     side: Literal["buy", "sell"]
+    type: Literal["MARKET", "LIMIT"] = "LIMIT"
     price: Decimal
     size: Decimal
     tif: Literal["IOC", "FOK", "GTC"] = "IOC"

@@ -141,24 +141,43 @@ class BinanceCexClient(CexClient):
         symbol = pair.symbol.replace('/', '')
         book = self.orderbooks.get(symbol)
 
-        if not book or not book['bids'] or not book['asks']:
-            logger.warning(f"無法從本地訂單簿獲取 {symbol} 的報價。")
-            return None
+        if book and book['bids'] and book['asks']:
+            # 優先使用本地訂單簿
+            best_bid = max(book['bids'].keys())
+            best_ask = min(book['asks'].keys())
+            bid_size = book['bids'][best_bid]
+            ask_size = book['asks'][best_ask]
+        else:
+            # 如果本地訂單簿不可用，透過 API 直接查詢
+            logger.info(f"本地訂單簿 {symbol} 不可用，正在透過 API 查詢報價...")
+            if not self._session:
+                logger.error("Session not initialized for API quote fetch.")
+                return None
+            
+            params = {'symbol': symbol}
+            try:
+                async with self._session.get(f"{self.base_url}/api/v3/ticker/bookTicker", params=params) as response:
+                    response.raise_for_status()
+                    data = await response.json(loads=orjson.loads)
+                    best_bid = Decimal(data['bidPrice'])
+                    best_ask = Decimal(data['askPrice'])
+                    bid_size = Decimal(data['bidQty'])
+                    ask_size = Decimal(data['askQty'])
+                    logger.info(f"成功透過 API 獲取 {symbol} 報價: Bid={best_bid}, Ask={best_ask}")
+            except aiohttp.ClientError as e:
+                logger.error(f"透過 API 獲取 {symbol} 報價失敗: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"處理 API 報價時發生未知錯誤: {e}", exc_info=True)
+                return None
 
-        # 找到最佳買賣價
-        best_bid = max(book['bids'].keys())
-        best_ask = min(book['asks'].keys())
-
-        # 為了與 detector 兼容，返回一個包含買賣價的組合報價
-        # 實際應用中，detector 應該能處理分離的買賣報價
         return Quote(
             pair=pair,
-            # 這裡的 price 欄位意義不大，因為我們有分離的 bid/ask
             price=(best_bid + best_ask) / 2,
             bid_price=best_bid,
             ask_price=best_ask,
-            bid_size=book['bids'][best_bid],
-            ask_size=book['asks'][best_ask],
+            bid_size=bid_size,
+            ask_size=ask_size,
             side="buy", # 佔位
             size=Decimal(0), # 佔位
             venue="CEX",
@@ -200,7 +219,10 @@ class BinanceCexClient(CexClient):
 
     async def get_balance(self, asset: str) -> Decimal:
         """查詢特定資產的可用餘額。"""
-        logger.debug(f"正在查詢 CEX 資產 {asset} 的餘額...")
+        # CEX (Binance) 通常使用 ETH 而不是 WETH
+        query_asset = "ETH" if asset.upper() == "WETH" else asset
+        
+        logger.debug(f"正在查詢 CEX 資產 {asset} (查詢為 {query_asset}) 的餘額...")
         params = {
             'timestamp': int(time.time() * 1000),
             'recvWindow': self.config.recv_window_ms
@@ -212,7 +234,7 @@ class BinanceCexClient(CexClient):
                 response.raise_for_status()
                 
                 for balance in data['balances']:
-                    if balance['asset'] == asset:
+                    if balance['asset'] == query_asset:
                         return Decimal(balance['free'])
                 return Decimal("0") # 如果餘額列表中沒有該資產
         except Exception as e:

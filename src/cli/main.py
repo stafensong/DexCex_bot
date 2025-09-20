@@ -57,11 +57,15 @@ def paper():
 
 
 @app.command()
-def rebalance():
+def rebalance(paper_run: bool = typer.Option(False, "--paper-run", help="執行紙上交易模式，不下單")):
     """
     執行一次性的資產再平衡檢查與操作。
     """
-    typer.echo("正在執行資產再平衡...")
+    if paper_run:
+        typer.echo("正在執行資產再平衡 (Paper Run 模式)...")
+    else:
+        typer.echo("正在執行資產再平衡...")
+    
     uvloop.install()
     config = load_config()
     
@@ -78,7 +82,7 @@ def rebalance():
         await cex_client.connect()
         
         rebalancer = Rebalancer(config, cex_client)
-        await rebalancer.run_rebalance_check()
+        await rebalancer.run_rebalance_check(paper_run=paper_run)
         
         await cex_client.close()
 
@@ -88,6 +92,53 @@ def rebalance():
         typer.echo(f"執行再平衡時發生錯誤: {e}", err=True)
     finally:
         typer.echo("再平衡任務結束。")
+
+
+@app.command()
+def check_dex_balance():
+    """
+    檢查並顯示 DEX 錢包中所有已設定代幣的餘額。
+    """
+    typer.echo("正在查詢 DEX 錢包餘額...")
+    uvloop.install()
+    config = load_config()
+
+    # Dynamically import here to avoid circular dependency if main grows
+    from src.exchange.univ3 import UniV3DexClient
+
+    async def main():
+        dex_client = UniV3DexClient(config.dex, config.network, config.secrets, config.tokens)
+        
+        typer.echo(f"錢包地址: {dex_client.user_address}")
+        typer.echo("-" * 40)
+
+        # 遍歷所有設定的代幣和鏈
+        for token_symbol, chains in config.tokens.items():
+            for chain in chains.keys():
+                typer.echo(f"正在查詢 {token_symbol} on {chain}...")
+                balance = await dex_client.get_balance(token_symbol, chain)
+                if balance >= 0:
+                    typer.secho(f"  -> {balance:.8f} {token_symbol}", fg=typer.colors.GREEN)
+                else:
+                    typer.secho(f"  -> 查詢失敗", fg=typer.colors.RED)
+        
+        # 額外檢查原生代幣
+        for chain, symbol in config.network.native_token.items():
+             if symbol not in config.tokens:
+                typer.echo(f"正在查詢原生代幣 {symbol} on {chain}...")
+                balance = await dex_client.get_balance(symbol, chain)
+                if balance >= 0:
+                    typer.secho(f"  -> {balance:.8f} {symbol}", fg=typer.colors.GREEN)
+                else:
+                    typer.secho(f"  -> 查詢失敗", fg=typer.colors.RED)
+
+
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        typer.echo(f"查詢餘額時發生錯誤: {e}", err=True)
+    finally:
+        typer.echo("DEX 餘額查詢完畢。")
 
 
 @app.command()

@@ -25,6 +25,7 @@ class TokenDetails(BaseModel):
 class NetworkConfig(BaseModel):
     default_chain: str
     rpc_urls: Dict[str, str] = {}
+    native_token: Dict[str, str] = {}
     max_pending_seconds: int
     gas_estimation_chain: str
     priority_fee_gwei: float

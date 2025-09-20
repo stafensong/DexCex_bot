@@ -5,6 +5,10 @@ env: "dev"
 network:
   # RPC URL 將從 .env 文件中讀取
   default_chain: "ethereum"
+  native_token:
+    ethereum: "ETH"
+    arbitrum: "ETH"
+    bsc: "BNB"
   max_pending_seconds: 30       # 一筆 DEX 交易等待打包的最長時間
   gas_estimation_chain: "ethereum" # 用於估算通用 Gas 成本的鏈
   # EIP-1559 費用設定
@@ -46,7 +50,7 @@ risk:
 inventory:
   rebalance:
     enable: true
-    target_ratio: 0.5              # CEX vs DEX 資金目標比例 (例如 0.5 代表 1:1)
+    target_ratio: 0.5              # CEX 內基礎資產 vs 報價資產的價值目標比例 (例如 0.5 代表 WETH 和 USDT 價值 1:1)
     trigger_bps: 500               # 當比例偏離目標超過 5% 時觸發
     method: "on_cex"               # "on_cex" | "on_dex" | "cross"
 

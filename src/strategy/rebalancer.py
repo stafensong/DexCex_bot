@@ -13,7 +13,7 @@ class Rebalancer:
         self.pairs_config = {p.cex_symbol: p for p in config.pairs}
         logger.info("資產再平衡器初始化。")
 
-    async def run_rebalance_check(self):
+    async def run_rebalance_check(self, paper_run: bool = False):
         if not self.config.enable:
             logger.info("資產再平衡功能未啟用。")
             return
@@ -68,6 +68,10 @@ class Rebalancer:
             side = "buy" if value_to_trade > 0 else "sell"
 
             logger.info(f"計畫在 CEX 以市價單 {side} {amount_to_trade:.6f} {base_asset}")
+
+            if paper_run:
+                logger.warning("Paper Run 模式啟用，跳過實際交易。")
+                return
 
             # 5. 執行交易
             try:
