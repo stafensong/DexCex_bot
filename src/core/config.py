@@ -37,6 +37,7 @@ class NetworkConfig(BaseModel):
             "ethereum": os.getenv("ETH_RPC_URL", ""),
             "arbitrum": os.getenv("ARBITRUM_RPC_URL", ""),
             "bsc": os.getenv("BSC_RPC_URL", ""),
+            "base": os.getenv("BASE_RPC_URL", ""),
         }
         # 過濾掉值為空的 URL
         self.rpc_urls = {chain: url for chain, url in raw_urls.items() if url}

@@ -4,13 +4,14 @@ env: "dev"
 # 網路與 Gas 設定
 network:
   # RPC URL 將從 .env 文件中讀取
-  default_chain: "ethereum"
+  default_chain: "base"
   native_token:
     ethereum: "ETH"
     arbitrum: "ETH"
     bsc: "BNB"
+    base: "ETH"
   max_pending_seconds: 30       # 一筆 DEX 交易等待打包的最長時間
-  gas_estimation_chain: "ethereum" # 用於估算通用 Gas 成本的鏈
+  gas_estimation_chain: "base" # 用於估算通用 Gas 成本的鏈
   # EIP-1559 費用設定
   priority_fee_gwei: 2.0        # 給礦工的小費
   max_fee_gwei: 60.0            # 你願意支付的最高總 Gas 費用
@@ -18,15 +19,24 @@ network:
 # DEX 通用設定
 dex:
   # 主要 DEX 的合約地址 (以 Ethereum 上的 Uniswap v3 為例)
+  # router是指SwapRouter02
   uniswap_v3:
     ethereum:
-      router: "0xE592427A0AEce92De3Edee1F18E0157C05861564"
-      quoter_v2: "0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6"
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+      quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
       weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
     arbitrum:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
       quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
       weth: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+    base:
+      router: "0x2626664c2603336E57B271c5C0b26F421741e481"
+      quoter_v2: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
+      weth: "0x4200000000000000000000000000000000000006"
+    bsc:
+      router: "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2"
+      quoter_v2: "0x78D78E420Da98ad378D7799bE8f4AF69033EB077"
+      weth: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
 
 # CEX 設定
 cex:
