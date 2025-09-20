@@ -84,57 +84,79 @@ class UniV3DexClient(DexClient):
             return Decimal("-1")
 
     async def get_quote(self, pair: MarketPair, size: Decimal, side: str) -> Optional[Quote]:
-        """使用 QuoterV2 合約獲取鏈上報價（quoteExactInputSingle，tuple 參數版）。"""
+        """
+        使用 Uniswap V3 QuoterV2：
+        - 賣單(sell base)：quoteExactInputSingle（base -> quote）
+        - 買單(buy base)：quoteExactOutputSingle（quote -> base）
+        一律回傳 DEX 價格 = quote per base（便於和 CEX 直接比較）
+        """
         w3 = self._get_w3(pair.dex_chain)
-        quoter_address = Web3.to_checksum_address(
-            self.dex_config.uniswap_v3[pair.dex_chain].quoter_v2
-        )
-        quoter_contract = w3.eth.contract(address=quoter_address, abi=self.quoter_abi)
+        quoter_address = Web3.to_checksum_address(self.dex_config.uniswap_v3[pair.dex_chain].quoter_v2)
+        quoter = w3.eth.contract(address=quoter_address, abi=self.quoter_abi)
 
         try:
-            # 1) 決定 tokenIn / tokenOut 與 amountIn（皆為 exact input 模式）
-            if side == 'sell':  # 賣 base，換 quote
-                token_in_details = self._get_token_details(pair.base, pair.dex_chain)
-                token_out_details = self._get_token_details(pair.quote, pair.dex_chain)
-                amount_in = int(size * (10 ** token_in_details.decimals))
-            else:  # 買 base，用 quote 當投入去換 base（仍是 exact input 模式）
-                token_in_details = self._get_token_details(pair.quote, pair.dex_chain)
-                token_out_details = self._get_token_details(pair.base, pair.dex_chain)
-                amount_in = int(size * (10 ** token_in_details.decimals))
+            fee = int(pair.dex_pool_fee)
 
-            token_in = Web3.to_checksum_address(token_in_details.address)
-            token_out = Web3.to_checksum_address(token_out_details.address)
-            fee = int(pair.dex_pool_fee)  # 確保是 int (uint24)
+            if side == 'sell':
+                # ---- 賣 base：exact input ----
+                base = self._get_token_details(pair.base, pair.dex_chain)
+                quote = self._get_token_details(pair.quote, pair.dex_chain)
 
-            # 2) QuoterV2 參數用 tuple 順序對應 ABI：
-            # (address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)
-            params_tuple = (token_in, token_out, int(amount_in), fee, 0)
+                token_in  = Web3.to_checksum_address(base.address)
+                token_out = Web3.to_checksum_address(quote.address)
 
-            # 3) 呼叫：V2 會回傳 (amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate)
-            out = await asyncio.to_thread(lambda: quoter_contract.functions
-                                        .quoteExactInputSingle(params_tuple)
-                                        .call())
-            amount_out_wei = out[0]
+                amount_in = int(Decimal(size) * (10 ** base.decimals))
+                if amount_in <= 0:
+                    return None
 
-            # 4) 換算與價格
-            amount_out = Decimal(amount_out_wei) / (10 ** token_out_details.decimals)
-            if size == 0:
+                # V2: (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
+                params_in = (token_in, token_out, int(amount_in), fee, 0)
+                out = await asyncio.to_thread(lambda: quoter.functions.quoteExactInputSingle(params_in).call())
+                amount_out_wei = out[0]  # quote out
+
+                quote_out = Decimal(amount_out_wei) / (Decimal(10) ** quote.decimals)
+                if size == 0:
+                    return None
+                price_q_per_b = quote_out / Decimal(size)  # quote per base
+
+            else:
+                # ---- 買 base：exact output ----
+                base = self._get_token_details(pair.base, pair.dex_chain)
+                quote = self._get_token_details(pair.quote, pair.dex_chain)
+
+                token_in  = Web3.to_checksum_address(quote.address)  # 我們要花 quote
+                token_out = Web3.to_checksum_address(base.address)   # 拿到 base
+
+                amount_out = int(Decimal(size) * (10 ** base.decimals))  # 想要拿到這麼多 base
+                if amount_out <= 0:
+                    return None
+
+                # V2: quoteExactOutputSingle((tokenIn, tokenOut, amount, fee, sqrtPriceLimitX96))
+                params_out = (token_in, token_out, int(amount_out), fee, 0)
+                out = await asyncio.to_thread(lambda: quoter.functions.quoteExactOutputSingle(params_out).call())
+                amount_in_wei = out[0]  # 需要投入多少 quote
+
+                quote_in = Decimal(amount_in_wei) / (Decimal(10) ** quote.decimals)
+                if size == 0:
+                    return None
+                price_q_per_b = quote_in / Decimal(size)  # quote per base
+
+            # 合理性過濾（ETH/USDT 可按需調整範圍）
+            if not (Decimal("100") <= price_q_per_b <= Decimal("10000")):
+                logger.debug(f"丟棄不合理 DEX 價: {price_q_per_b} ({pair.symbol} on {pair.dex_chain}, side={side})")
                 return None
 
-            # 每 1 token_in 可換多少 token_out（exact input）
-            effective_price = amount_out / size # Decimal
-
+            # 回傳（若主程式用 float 聚合，可在這裡轉 float）
             return Quote(
                 pair=pair,
                 side=side,
-                price=effective_price,
-                size=size,
+                price=price_q_per_b,   # Decimal；如需：float(price_q_per_b)
+                size=size,             # Decimal；如需：float(size)
                 venue="DEX",
                 timestamp=time.time(),
             )
 
         except Exception as e:
-            # 若看到 "sequence of length 3" 幾乎就是 ABI/參數打包問題或 fee 型別問題
             logger.warning(f"獲取 DEX 報價失敗 ({pair.symbol} on {pair.dex_chain}): {e}")
             return None
 
