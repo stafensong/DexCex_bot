@@ -84,47 +84,57 @@ class UniV3DexClient(DexClient):
             return Decimal("-1")
 
     async def get_quote(self, pair: MarketPair, size: Decimal, side: str) -> Optional[Quote]:
-        """使用 QuoterV2 合約獲取鏈上報價。"""
+        """使用 QuoterV2 合約獲取鏈上報價（quoteExactInputSingle，tuple 參數版）。"""
         w3 = self._get_w3(pair.dex_chain)
-        quoter_address = Web3.to_checksum_address(self.dex_config.uniswap_v3[pair.dex_chain].quoter_v2)
+        quoter_address = Web3.to_checksum_address(
+            self.dex_config.uniswap_v3[pair.dex_chain].quoter_v2
+        )
         quoter_contract = w3.eth.contract(address=quoter_address, abi=self.quoter_abi)
 
         try:
-            if side == 'sell': # 賣 base, 買 quote
+            # 1) 決定 tokenIn / tokenOut 與 amountIn（皆為 exact input 模式）
+            if side == 'sell':  # 賣 base，換 quote
                 token_in_details = self._get_token_details(pair.base, pair.dex_chain)
                 token_out_details = self._get_token_details(pair.quote, pair.dex_chain)
-                amount_in = int(size * (10**token_in_details.decimals))
-            else: # 買 base, 賣 quote
+                amount_in = int(size * (10 ** token_in_details.decimals))
+            else:  # 買 base，用 quote 當投入去換 base（仍是 exact input 模式）
                 token_in_details = self._get_token_details(pair.quote, pair.dex_chain)
                 token_out_details = self._get_token_details(pair.base, pair.dex_chain)
-                estimated_price = Decimal("3000") # 假設 ETH 價格
-                amount_in = int(size * estimated_price * (10**token_in_details.decimals))
+                amount_in = int(size * (10 ** token_in_details.decimals))
 
-            quote_params = {
-                'tokenIn': Web3.to_checksum_address(token_in_details.address),
-                'tokenOut': Web3.to_checksum_address(token_out_details.address),
-                'amountIn': amount_in,
-                'fee': pair.dex_pool_fee,
-                'sqrtPriceLimitX96': 0
-            }
-            
-            amount_out_wei = await asyncio.to_thread(
-                quoter_contract.functions.quoteExactInputSingle(quote_params).call
-            )
-            
-            amount_out = Decimal(amount_out_wei) / (10**token_out_details.decimals)
-            
-            if side == 'sell':
-                effective_price = amount_out / size
-            else:
-                effective_price = (Decimal(amount_in) / (10**token_in_details.decimals)) / size
+            token_in = Web3.to_checksum_address(token_in_details.address)
+            token_out = Web3.to_checksum_address(token_out_details.address)
+            fee = int(pair.dex_pool_fee)  # 確保是 int (uint24)
+
+            # 2) QuoterV2 參數用 tuple 順序對應 ABI：
+            # (address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)
+            params_tuple = (token_in, token_out, int(amount_in), fee, 0)
+
+            # 3) 呼叫：V2 會回傳 (amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate)
+            out = await asyncio.to_thread(lambda: quoter_contract.functions
+                                        .quoteExactInputSingle(params_tuple)
+                                        .call())
+            amount_out_wei = out[0]
+
+            # 4) 換算與價格
+            amount_out = Decimal(amount_out_wei) / (10 ** token_out_details.decimals)
+            if size == 0:
+                return None
+
+            # 每 1 token_in 可換多少 token_out（exact input）
+            effective_price = amount_out / size # Decimal
 
             return Quote(
-                pair=pair, side=side, price=effective_price, size=size, 
-                venue="DEX", timestamp=time.time()
+                pair=pair,
+                side=side,
+                price=effective_price,
+                size=size,
+                venue="DEX",
+                timestamp=time.time(),
             )
 
         except Exception as e:
+            # 若看到 "sequence of length 3" 幾乎就是 ABI/參數打包問題或 fee 型別問題
             logger.warning(f"獲取 DEX 報價失敗 ({pair.symbol} on {pair.dex_chain}): {e}")
             return None
 

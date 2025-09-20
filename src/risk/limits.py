@@ -1,3 +1,4 @@
+from decimal import Decimal
 from loguru import logger
 from ..core.config import RiskConfig
 from ..core.types import Opportunity, ExecutionSummary
@@ -9,7 +10,7 @@ class RiskManager:
         # 從檔案載入初始狀態
         initial_state = load_state()
         self.positions = initial_state.get("positions", {}) # e.g., {"ETH": 0.5}
-        self.daily_pnl = initial_state.get("daily_pnl", 0.0)
+        self.daily_pnl = Decimal(str(initial_state.get("daily_pnl", "0.0")))
         logger.info(f"風險管理器初始化，當前部位: {self.positions}, 今日 PnL: {self.daily_pnl}")
 
     def is_trade_allowed(self, opp: Opportunity) -> bool:
@@ -38,6 +39,6 @@ class RiskManager:
         # 將更新後的狀態保存到檔案
         current_state = {
             "positions": self.positions,
-            "daily_pnl": self.daily_pnl
+            "daily_pnl": float(self.daily_pnl) # JSON 序列化前轉為 float
         }
         save_state(current_state)
