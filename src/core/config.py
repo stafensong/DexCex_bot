@@ -1,6 +1,7 @@
 import os
 import yaml
-from typing import List, Dict, Literal
+from decimal import Decimal
+from typing import List, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from dotenv import load_dotenv
@@ -89,6 +90,9 @@ class PairConfig(BaseModel):
     max_size_quote: int
     dex_chain: str
     dex_pool_fee: int
+    price_floor_quote: Optional[Decimal] = None
+    price_ceiling_quote: Optional[Decimal] = None
+    max_edge_bps: Optional[int] = None
 
 class SecretsConfig(BaseModel):
     binance_api_key: SecretStr

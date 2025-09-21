@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -23,7 +24,13 @@ def mock_pair_config() -> PairConfig:
 # 模擬的 MarketPair
 @pytest.fixture
 def market_pair() -> MarketPair:
-    return MarketPair(base="WETH", quote="USDT", symbol="ETH/USDT")
+    return MarketPair(
+        base="WETH",
+        quote="USDT",
+        symbol="ETH/USDT",
+        dex_chain="ethereum",
+        dex_pool_fee=500,
+    )
 
 # 模擬的 CEX 和 DEX 客戶端
 @pytest.fixture
@@ -32,8 +39,7 @@ def mock_clients():
     dex_client = AsyncMock()
     return cex_client, dex_client
 
-@pytest.mark.asyncio
-async def test_no_opportunity(mock_clients, mock_pair_config, market_pair):
+def test_no_opportunity(mock_clients, mock_pair_config, market_pair):
     """測試沒有套利機會的情況"""
     cex_client, dex_client = mock_clients
 
@@ -51,12 +57,11 @@ async def test_no_opportunity(mock_clients, mock_pair_config, market_pair):
     dex_client.get_quote.side_effect = dex_quote_side_effect
 
     detector = OpportunityDetector(cex_client, dex_client, [mock_pair_config])
-    opportunities = await detector.detect()
+    opportunities = asyncio.run(detector.detect())
 
     assert len(opportunities) == 0
 
-@pytest.mark.asyncio
-async def test_cex_to_dex_opportunity(mock_clients, mock_pair_config, market_pair):
+def test_cex_to_dex_opportunity(mock_clients, mock_pair_config, market_pair):
     """測試 CEX 買 -> DEX 賣的機會"""
     cex_client, dex_client = mock_clients
 
@@ -73,7 +78,7 @@ async def test_cex_to_dex_opportunity(mock_clients, mock_pair_config, market_pai
     dex_client.get_quote.side_effect = dex_quote_side_effect
 
     detector = OpportunityDetector(cex_client, dex_client, [mock_pair_config])
-    opportunities = await detector.detect()
+    opportunities = asyncio.run(detector.detect())
 
     assert len(opportunities) == 1
     opp = opportunities[0]
@@ -82,7 +87,7 @@ async def test_cex_to_dex_opportunity(mock_clients, mock_pair_config, market_pai
     assert opp.dex_price == Decimal("3004")   # DEX bid price
     assert opp.edge_bps > mock_pair_config.min_edge_bps
 
-async def test_dex_to_cex_opportunity(mock_clients, mock_pair_config, market_pair):
+def test_dex_to_cex_opportunity(mock_clients, mock_pair_config, market_pair):
     """測試 DEX 買 -> CEX 賣的機會"""
     cex_client, dex_client = mock_clients
 
@@ -99,7 +104,7 @@ async def test_dex_to_cex_opportunity(mock_clients, mock_pair_config, market_pai
     dex_client.get_quote.side_effect = dex_quote_side_effect
 
     detector = OpportunityDetector(cex_client, dex_client, [mock_pair_config])
-    opportunities = await detector.detect()
+    opportunities = asyncio.run(detector.detect())
 
     assert len(opportunities) == 1
     opp = opportunities[0]
@@ -108,7 +113,7 @@ async def test_dex_to_cex_opportunity(mock_clients, mock_pair_config, market_pai
     assert opp.dex_price == Decimal("3001")   # DEX ask price
     assert opp.edge_bps > mock_pair_config.min_edge_bps
 
-async def test_opportunity_below_threshold(mock_clients, mock_pair_config, market_pair):
+def test_opportunity_below_threshold(mock_clients, mock_pair_config, market_pair):
     """測試價差小於最小門檻的情況"""
     cex_client, dex_client = mock_clients
 
@@ -125,6 +130,6 @@ async def test_opportunity_below_threshold(mock_clients, mock_pair_config, marke
     dex_client.get_quote.side_effect = dex_quote_side_effect
 
     detector = OpportunityDetector(cex_client, dex_client, [mock_pair_config])
-    opportunities = await detector.detect()
+    opportunities = asyncio.run(detector.detect())
 
     assert len(opportunities) == 0

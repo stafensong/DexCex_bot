@@ -1,227 +1,263 @@
-import asyncio
 import time
-from decimal import Decimal
-from typing import Optional, Tuple, List
+from dataclasses import dataclass
+from decimal import Decimal, DivisionByZero, InvalidOperation
+from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from ..core.types import Opportunity, CexOrder, OrderUpdate, DexSwapParams, DexTxReceipt, ExecutionSummary, ExecutionLeg
-from ..core.errors import HedgingError
+from ..core.config import PairConfig
+from ..core.types import Opportunity, ExecutionSummary, ExecutionLeg
 from ..exchange.cex_base import CexClient
 from ..exchange.dex_base import DexClient
-from ..risk.limits import RiskManager
 from ..infra import metrics
+from ..risk.limits import RiskManager
+
+
+@dataclass(frozen=True)
+class SanityThresholds:
+    price_floor: Decimal
+    price_ceiling: Decimal
+    max_edge_bps: Decimal
+
+
+DEFAULT_SANITY_THRESHOLDS = SanityThresholds(
+    price_floor=Decimal("0"),
+    price_ceiling=Decimal("1000000"),
+    max_edge_bps=Decimal("50000"),
+)
+TEN_THOUSAND = Decimal("10000")
+ZERO = Decimal("0")
+
+
+def build_threshold_map(pair_configs: Optional[List[PairConfig]]) -> Dict[str, SanityThresholds]:
+    if not pair_configs:
+        return {}
+
+    thresholds: Dict[str, SanityThresholds] = {}
+    for cfg in pair_configs:
+        price_floor = cfg.price_floor_quote if cfg.price_floor_quote is not None else DEFAULT_SANITY_THRESHOLDS.price_floor
+        price_ceiling = cfg.price_ceiling_quote if cfg.price_ceiling_quote is not None else DEFAULT_SANITY_THRESHOLDS.price_ceiling
+        max_edge = Decimal(cfg.max_edge_bps) if cfg.max_edge_bps is not None else DEFAULT_SANITY_THRESHOLDS.max_edge_bps
+        thresholds[cfg.cex_symbol] = SanityThresholds(price_floor=price_floor, price_ceiling=price_ceiling, max_edge_bps=max_edge)
+    return thresholds
+
+
+def determine_leg_prices(opp: Opportunity) -> Tuple[Decimal, Decimal]:
+    if opp.direction == "DEX_to_CEX":
+        return opp.dex_price, opp.cex_price
+    return opp.cex_price, opp.dex_price
+
+
+def build_legs(opp: Opportunity) -> List[ExecutionLeg]:
+    if opp.direction == "DEX_to_CEX":
+        dex_leg = ExecutionLeg(
+            venue="DEX",
+            side="buy",
+            price_quote=opp.dex_price,
+            size=opp.size,
+            fees_quote=opp.gas_cost_quote,
+        )
+        cex_leg = ExecutionLeg(
+            venue="CEX",
+            side="sell",
+            price_quote=opp.cex_price,
+            size=opp.size,
+            fees_quote=opp.cex_fee_quote,
+        )
+        return [dex_leg, cex_leg]
+
+    cex_leg = ExecutionLeg(
+        venue="CEX",
+        side="buy",
+        price_quote=opp.cex_price,
+        size=opp.size,
+        fees_quote=opp.cex_fee_quote,
+    )
+    dex_leg = ExecutionLeg(
+        venue="DEX",
+        side="sell",
+        price_quote=opp.dex_price,
+        size=opp.size,
+        fees_quote=opp.gas_cost_quote,
+    )
+    return [cex_leg, dex_leg]
+
+
+def compute_edge(buy_price: Decimal, sell_price: Decimal) -> Decimal:
+    if buy_price <= ZERO:
+        raise DivisionByZero("買入價格必須為正數才能計算 edge。")
+    return (sell_price / buy_price - Decimal(1)) * TEN_THOUSAND
+
+
+def compute_pnl(opp: Opportunity, buy_price: Decimal, sell_price: Decimal) -> Decimal:
+    gross = opp.size * (sell_price - buy_price)
+    return gross - opp.gas_cost_quote - opp.cex_fee_quote
+
+
+def evaluate_opportunity(
+    opp: Opportunity,
+    thresholds: SanityThresholds,
+) -> Tuple[List[ExecutionLeg], Optional[Decimal], Optional[Decimal], Optional[str]]:
+    buy_price, sell_price = determine_leg_prices(opp)
+
+    if opp.cex_price <= ZERO:
+        return [], None, None, "cex_price_non_positive"
+    if opp.dex_price <= ZERO:
+        return [], None, None, "dex_price_non_positive"
+
+    if opp.cex_price < thresholds.price_floor or opp.cex_price > thresholds.price_ceiling:
+        return [], None, None, "cex_price_out_of_range"
+    if opp.dex_price < thresholds.price_floor or opp.dex_price > thresholds.price_ceiling:
+        return [], None, None, "dex_price_out_of_range"
+
+    if buy_price <= ZERO:
+        return [], None, None, "buy_price_non_positive"
+    if sell_price <= ZERO:
+        return [], None, None, "sell_price_non_positive"
+
+    try:
+        edge_bps = compute_edge(buy_price, sell_price)
+    except (DivisionByZero, InvalidOperation):
+        return [], None, None, "edge_computation_error"
+
+    if abs(edge_bps) > thresholds.max_edge_bps:
+        return [], None, edge_bps, "edge_beyond_threshold"
+
+    pnl_quote = compute_pnl(opp, buy_price, sell_price)
+    legs = build_legs(opp)
+    return legs, pnl_quote, edge_bps, None
+
 
 class TransactionExecutor:
-    def __init__(self, cex_client: CexClient, dex_client: DexClient, risk_manager: RiskManager):
+    """
+    交易執行器會將 `Opportunity` 轉換成兩條標準化交易腿，並計算預期損益與價差。
+    - `DEX_to_CEX`: 先在 DEX `buy` base，再在 CEX `sell` base。
+    - `CEX_to_DEX`: 先在 CEX `buy` base，再在 DEX `sell` base。
+    `ExecutionLeg.price_quote` 皆為「報價幣 / base」價格，`ExecutionLeg.size` 始終是 base 數量。
+    PnL 計算: `size * (sell_px - buy_px) - gas_cost_quote - cex_fee_quote`。
+    模組同時套用可配置的價格／edge sanity check，以避免異常資料污染計算。
+    """
+
+    def __init__(
+        self,
+        cex_client: Optional[CexClient],
+        dex_client: Optional[DexClient],
+        risk_manager: Optional[RiskManager],
+        pair_configs: Optional[List[PairConfig]] = None,
+    ):
         self.cex_client = cex_client
         self.dex_client = dex_client
         self.risk_manager = risk_manager
-        logger.info("交易執行器初始化。")
+        self._thresholds = build_threshold_map(pair_configs)
 
     async def run(self, opp: Opportunity) -> ExecutionSummary:
-        """
-        核心功能：接收一個機會，原子化地執行它，並在失敗時對沖。
-        """
+        """根據輸入的 `Opportunity` 計算 legs、PnL 與 edge。"""
         start_ts = time.time()
-        legs: List[ExecutionLeg] = []
-        cex_task = None
-        dex_task = None
-        
-        try:
-            logger.info(f"開始執行機會: {opp.direction} {opp.size} {opp.pair.symbol}")
+        thresholds = self._thresholds.get(opp.pair.symbol, DEFAULT_SANITY_THRESHOLDS)
 
-            # 建立 CEX 和 DEX 的執行任務
-            if opp.direction == "CEX_to_DEX": # Buy CEX, Sell DEX
-                cex_task = asyncio.create_task(self._execute_cex_leg(opp, "buy"))
-                dex_task = asyncio.create_task(self._execute_dex_leg(opp, "sell"))
-            else: # DEX_to_CEX: Buy DEX, Sell CEX
-                dex_task = asyncio.create_task(self._execute_dex_leg(opp, "buy"))
-                cex_task = asyncio.create_task(self._execute_cex_leg(opp, "sell"))
+        legs, pnl_quote, edge_bps, error = evaluate_opportunity(opp, thresholds)
+        if error:
+            logger.warning(
+                "機會未通過 sanity check: pair=%s direction=%s reason=%s",
+                opp.pair.symbol,
+                opp.direction,
+                error,
+            )
+            metrics.trades_executed.labels(
+                pair=opp.pair.symbol,
+                direction=opp.direction,
+                status="invalid",
+            ).inc()
+            return self._build_invalid_summary(opp, start_ts)
 
-            results = await asyncio.gather(cex_task, dex_task, return_exceptions=True)
-            
-            successful_legs = []
-            failed_legs = []
-            for res in results:
-                if isinstance(res, ExecutionLeg):
-                    successful_legs.append(res)
-                else:
-                    # 異常被 gather 捕獲
-                    logger.error(f"交易腿執行異常: {res}")
-                    failed_legs.append(res)
-            
-            legs.extend(successful_legs)
+        summary = ExecutionSummary(
+            pair=opp.pair,
+            direction=opp.direction,
+            size=opp.size,
+            legs=legs,
+            gas_quote=opp.gas_cost_quote,
+            pnl_quote=pnl_quote,
+            edge_bps=edge_bps,
+            hedged=False,
+            started_ts=start_ts,
+            completed_ts=time.time(),
+        )
 
-            if failed_legs:
-                logger.warning(f"{len(failed_legs)} 個交易腿失敗，需要對沖。")
-                if successful_legs:
-                    hedge_leg = await self._handle_partial_failure(successful_legs[0])
-                    legs.append(hedge_leg)
-                raise PartialFailureError(f"{len(failed_legs)} legs failed")
+        metrics.trades_executed.labels(
+            pair=opp.pair.symbol,
+            direction=opp.direction,
+            status="success",
+        ).inc()
+        metrics.pnl_quote.labels(pair=opp.pair.symbol).inc(float(pnl_quote))
+        return summary
 
-            # --- 如果兩邊都成功 ---
-            logger.success("交易計畫兩邊均成功執行！")
-            pnl, fees = self._calculate_pnl(legs)
-            summary = self._build_summary(opp, legs, pnl, fees, hedged=False, start_ts=start_ts)
-            metrics.trades_executed.labels(pair=opp.pair.symbol, direction=opp.direction, status="success").inc()
-            metrics.pnl_quote.labels(pair=opp.pair.symbol).inc(pnl)
-            return summary
+    def _build_invalid_summary(self, opp: Opportunity, start_ts: float) -> ExecutionSummary:
+        return ExecutionSummary(
+            pair=opp.pair,
+            direction=opp.direction,
+            size=opp.size,
+            legs=[],
+            gas_quote=ZERO,
+            pnl_quote=ZERO,
+            edge_bps=ZERO,
+            hedged=False,
+            started_ts=start_ts,
+            completed_ts=time.time(),
+        )
 
-        except Exception as e:
-            logger.error(f"執行或對沖過程中發生錯誤: {e}")
-            pnl, fees = self._calculate_pnl(legs)
-            summary = self._build_summary(opp, legs, pnl, fees, hedged=False, start_ts=start_ts)
-            metrics.trades_executed.labels(pair=opp.pair.symbol, direction=opp.direction, status="failed").inc()
-            return summary
 
-    async def _execute_cex_leg(self, opp: Opportunity, side: str) -> ExecutionLeg:
-        order = CexOrder(pair=opp.pair, side=side, type="MARKET", size=opp.size, price=opp.cex_price, order_id="", ts=0)
-        try:
-            update = await self.cex_client.create_order(order)
-            if update.status == "FILLED":
-                fee = update.avg_fill_price * update.filled_size * Decimal("0.001") # 模擬費用
-                return ExecutionLeg(
-                    venue="CEX", side=side, price_quote=update.avg_fill_price,
-                    size=update.filled_size, fees_quote=fee, order_id=update.order_id
-                )
-            else:
-                raise Exception(f"CEX 訂單狀態非 FILLED: {update.status}")
-        except Exception as e:
-            metrics.failed_leg.labels(pair=opp.pair.symbol, venue="CEX", reason="execution_error").inc()
-            logger.error(f"CEX 交易腿 ({side}) 失敗: {e}")
-            raise
+class PaperExecutor:
+    """
+    一個僅記錄日誌而不執行真實交易的執行器。
+    與 `TransactionExecutor` 相同地產生 legs 與 PnL，並套用 sanity check。
+    """
 
-    async def _execute_dex_leg(self, opp: Opportunity, side: str) -> ExecutionLeg:
-        logger.info(f"準備 DEX 交易腿 ({side}) on {opp.dex_chain}...")
-        try:
-            # TODO: 這部分應由一個更健壯的 Token Registry 服務來提供
-            # 這裡我們使用一個簡化的硬編碼地址映射
-            token_map = {
-                "WETH": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "decimals": 18},
-                "USDT": {"address": "0xdAC17F958D2ee523a2206206994597C13D831ec7", "decimals": 6},
-                "USDC": {"address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "decimals": 6}
-            }
+    def __init__(self, pair_configs: Optional[List[PairConfig]] = None):
+        logger.info("紙上交易執行器初始化。將只記錄機會，不執行交易。")
+        self._thresholds = build_threshold_map(pair_configs)
 
-            if side == 'sell': # 賣 base, 買 quote
-                token_in = token_map[opp.pair.base]
-                token_out = token_map[opp.pair.quote]
-                amount_in = opp.size
-            else: # 買 base, 賣 quote
-                token_in = token_map[opp.pair.quote]
-                token_out = token_map[opp.pair.base]
-                # 買入時，我們用報價幣來支付，數量是 CEX 價格 * base 數量
-                amount_in = opp.cex_price * opp.size
+    async def run(self, opp: Opportunity) -> ExecutionSummary:
+        start_ts = time.time()
+        thresholds = self._thresholds.get(opp.pair.symbol, DEFAULT_SANITY_THRESHOLDS)
 
-            params = DexSwapParams(
-                chain=opp.dex_chain,
-                token_in_address=token_in['address'],
-                token_in_decimals=token_in['decimals'],
-                token_out_address=token_out['address'],
-                fee=opp.dex_pool_fee,
-                amount_in=amount_in,
-                slippage_bps=opp.slippage_bps
+        legs, pnl_quote, edge_bps, error = evaluate_opportunity(opp, thresholds)
+        if error:
+            logger.warning(
+                "[PAPER MODE] 機會被拒絕: pair=%s direction=%s reason=%s",
+                opp.pair.symbol,
+                opp.direction,
+                error,
+            )
+            return ExecutionSummary(
+                pair=opp.pair,
+                direction=opp.direction,
+                size=opp.size,
+                legs=[],
+                gas_quote=ZERO,
+                pnl_quote=ZERO,
+                edge_bps=ZERO,
+                hedged=False,
+                started_ts=start_ts,
+                completed_ts=time.time(),
             )
 
-            receipt = await self.dex_client.execute_swap(params)
-            
-            fee = Decimal(receipt.gas_used * receipt.effective_gas_price) / Decimal(1e18) * opp.cex_price # Gas fee in quote currency
-            return ExecutionLeg(
-                venue="DEX", side=side, price_quote=receipt.avg_fill_price,
-                size=receipt.filled_size, fees_quote=fee, tx_hash=receipt.tx_hash
-            )
-        except Exception as e:
-            metrics.failed_leg.labels(pair=opp.pair.symbol, venue="DEX", reason="execution_error").inc()
-            logger.error(f"DEX 交易腿 ({side}) 失敗: {e}")
-            raise
-
-    async def _handle_partial_failure(self, leg_to_hedge: ExecutionLeg) -> ExecutionLeg:
-        logger.warning(f"在 {leg_to_hedge.venue} 的交易成功，但另一邊失敗。開始執行對沖...")
-        hedge_side = "sell" if leg_to_hedge.side == "buy" else "buy"
-        
-        try:
-            if leg_to_hedge.venue == "CEX":
-                hedge_order = CexOrder(pair=self.risk_manager.positions, side=hedge_side, type="MARKET", size=leg_to_hedge.size, price=Decimal(0), order_id="", ts=0)
-                update = await self.cex_client.create_order(hedge_order)
-                fee = update.avg_fill_price * update.filled_size * Decimal("0.001")
-                hedge_leg = ExecutionLeg(venue="CEX", side=hedge_side, price_quote=update.avg_fill_price, size=update.filled_size, fees_quote=fee, order_id=f"hedge_{update.order_id}")
-            else: # DEX hedge
-                # 模擬對沖
-                hedge_leg = ExecutionLeg(venue="DEX", side=hedge_side, price_quote=leg_to_hedge.price_quote, size=leg_to_hedge.size, fees_quote=leg_to_hedge.fees_quote, tx_hash=f"0x_hedge_sim_{time.time()}")
-
-            logger.success(f"成功在 {hedge_leg.venue} 對沖風險部位。")
-            metrics.hedged_leg.labels(pair=opp.pair.symbol, venue=hedge_leg.venue).inc()
-            return hedge_leg
-        except Exception as e:
-            logger.critical(f"！！！對沖失敗！！！風險部位暴露！: {e}", exc_info=True)
-            metrics.failed_leg.labels(pair=opp.pair.symbol, venue=leg_to_hedge.venue, reason="hedge_failed").inc()
-            raise HedgingError("對沖失敗", None, None)
-
-    def _calculate_pnl(self, legs: List[ExecutionLeg]) -> Tuple[Decimal, Decimal]:
-        if len(legs) < 2:
-            return Decimal(0), sum(leg.fees_quote for leg in legs)
-
-        buy_leg = next((leg for leg in legs if leg.side == 'buy'), None)
-        sell_leg = next((leg for leg in legs if leg.side == 'sell'), None)
-
-        if not (buy_leg and sell_leg):
-            # 這是對沖後的情況，PnL 計算會更複雜
-            total_fees = sum(leg.fees_quote for leg in legs)
-            return -total_fees, total_fees
-
-        revenue = sell_leg.price_quote * sell_leg.size
-        cost = buy_leg.price_quote * buy_leg.size
-        total_fees = sum(leg.fees_quote for leg in legs)
-        net_pnl = revenue - cost - total_fees
-        return net_pnl, total_fees
-
-    def _build_summary(self, opp: Opportunity, legs: List[ExecutionLeg], pnl: Decimal, fees: Decimal, hedged: bool, start_ts: float) -> ExecutionSummary:
+        logger.info(
+            "[PAPER MODE] 偵測到機會: %s %s | CEX=%.4f | DEX=%.4f | PnL=%.4f",
+            opp.direction,
+            opp.pair.symbol,
+            float(opp.cex_price),
+            float(opp.dex_price),
+            float(pnl_quote),
+        )
         return ExecutionSummary(
             pair=opp.pair,
             direction=opp.direction,
             size=opp.size,
             legs=legs,
-            gas_quote=opp.gas_cost_quote, # 應從DEX腿的執行結果中獲取
-            pnl_quote=pnl,
-            edge_bps=opp.edge_bps,
-            hedged=hedged,
-            started_ts=start_ts,
-            completed_ts=time.time()
-        )
-
-class PartialFailureError(Exception):
-    pass
-
-
-class PaperExecutor:
-    """
-    一個僅記錄日誌而不執行任何操作的執行器，用於紙上交易模式。
-    """
-    def __init__(self):
-        logger.info("紙上交易執行器初始化。將只記錄機會，不執行交易。")
-
-    async def run(self, opp: Opportunity) -> ExecutionSummary:
-        """
-        模擬執行一個機會，僅打印日誌。
-        """
-        start_ts = time.time()
-        logger.info(f"[PAPER MODE] 偵測到機會，本應執行: {opp.direction} {opp.size:.6f} {opp.pair.base}")
-        logger.info(f"           CEX Price: {opp.cex_price:.4f} | DEX Price: {opp.dex_price:.4f} | PnL: {opp.expected_pnl_quote:.4f}")
-        
-        # 返回一個模擬的成功交易摘要
-        mock_leg = ExecutionLeg(
-            venue="CEX", side="buy", price_quote=opp.cex_price, size=opp.size, fees_quote=opp.cex_fee_quote
-        )
-        return ExecutionSummary(
-            pair=opp.pair,
-            direction=opp.direction,
-            size=opp.size,
-            legs=[mock_leg, mock_leg], # 簡化模擬
             gas_quote=opp.gas_cost_quote,
-            pnl_quote=opp.expected_pnl_quote,
-            edge_bps=opp.edge_bps,
+            pnl_quote=pnl_quote,
+            edge_bps=edge_bps,
             hedged=False,
             started_ts=start_ts,
-            completed_ts=time.time()
+            completed_ts=time.time(),
         )
-

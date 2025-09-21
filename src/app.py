@@ -40,9 +40,9 @@ class ArbiBotApp:
         
         # 根據模式選擇執行器
         if self.mode == 'paper':
-            self.executor = PaperExecutor()
+            self.executor = PaperExecutor(config.pairs)
         else:
-            self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager)
+            self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager, config.pairs)
         self.logger.info(f"應用程式已在 {self.mode.upper()} 模式下初始化。")
 
     async def start(self):

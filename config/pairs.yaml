@@ -18,6 +18,9 @@ pairs:
     max_size_quote: 5000
     dex_chain: "ethereum"
     dex_pool_fee: 500
+    price_floor_quote: 100
+    price_ceiling_quote: 10000
+    max_edge_bps: 50000
 
   - base: "WETH"
     quote: "USDC"
@@ -27,6 +30,9 @@ pairs:
     max_size_quote: 5000
     dex_chain: "ethereum"
     dex_pool_fee: 500
+    price_floor_quote: 100
+    price_ceiling_quote: 10000
+    max_edge_bps: 50000
 
   - base: "ARB"
     quote: "USDT"
@@ -36,3 +42,6 @@ pairs:
     max_size_quote: 3000
     dex_chain: "arbitrum"
     dex_pool_fee: 3000
+    price_floor_quote: 0.1
+    price_ceiling_quote: 10
+    max_edge_bps: 50000

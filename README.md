@@ -42,8 +42,16 @@
 1.  **行情輸入**: `BinanceCexClient` 透過 WebSocket 維護訂單簿；`UniV3DexClient` 透過 RPC 查詢鏈上報價。
 2.  **機會偵測**: `OpportunityDetector` 不斷比對 CEX 和 DEX 的價格。
 3.  **產生機會**: 當價差超過 `min_edge_bps` 時，創建一個 `Opportunity` 物件。
-4.  **執行交易**: `TransactionExecutor` 接收 `Opportunity`，併發執行 CEX 和 DEX 交易腿，並處理失敗時的對沖。
+4.  **執行交易**: `TransactionExecutor` 接收 `Opportunity`，產生標準化的 CEX/DEX legs 並即時計算 PnL 與 sanity check。
 5.  **狀態更新**: `ExecutionSummary` 被發送到 `RiskManager`，後者更新倉位和 PnL，並透過 `storage.py` 將狀態持久化。
+
+#### 交易腿與損益計算
+
+- `DEX_to_CEX`：先在 DEX 以 `buy` 取得 base，再到 CEX 以 `sell` 釋出 base。
+- `CEX_to_DEX`：先在 CEX `buy` base，再在 DEX `sell` base。
+- 每條 `ExecutionLeg.price_quote` 都是「報價貨幣 / base」的價格，`ExecutionLeg.size` 始終是 base 數量，可直接與 CEX 報價比較。
+- 損益計算公式：`PnL = size * (sell_px - buy_px) - gas_cost_quote - cex_fee_quote`。
+- Executor 內建價格與 edge 的 sanity check，閾值可在 `config/pairs.yaml` 的 `price_floor_quote`、`price_ceiling_quote`、`max_edge_bps` 調整，以避免異常行情污染統計。
 
 ## 安裝與設定
 
