@@ -5,10 +5,16 @@ import asyncio
 from loguru import logger
 
 from ..core.config import PairConfig
-from ..core.types import Opportunity, MarketPair, Quote
+from ..core.types import Opportunity, MarketPair
 from ..exchange.cex_base import CexClient
 from ..exchange.dex_base import DexClient
 from ..infra import metrics
+
+CEX_TAKER_FEE_BPS = Decimal("7.5")
+DEFAULT_SAFETY_MULTIPLIER = Decimal("1.2")
+DEFAULT_TRADE_SIZE = Decimal("0.1")
+TEN_THOUSAND = Decimal("10000")
+ZERO = Decimal("0")
 
 class OpportunityDetector:
     def __init__(self, cex_client: CexClient, dex_client: DexClient, pairs: List[PairConfig]):
@@ -45,7 +51,7 @@ class OpportunityDetector:
             return None
 
         # 假設我們想交易 1 個 base asset (此處應有更智能的數量決定邏輯)
-        trade_size = Decimal("0.1") 
+        trade_size = DEFAULT_TRADE_SIZE
         
         # 併發獲取 DEX 報價
         dex_buy_task = self.dex_client.get_quote(pair, size=trade_size, side="buy")
@@ -55,49 +61,72 @@ class OpportunityDetector:
         if not (dex_buy_quote and dex_sell_quote):
             return None
 
-        cex_bid_price = cex_quote.bid_price
-        cex_ask_price = cex_quote.ask_price
-        dex_buy_price = dex_buy_quote.price
-        dex_sell_price = dex_sell_quote.price
+        cex_bid_price = Decimal(cex_quote.bid_price)
+        cex_ask_price = Decimal(cex_quote.ask_price)
+        dex_buy_price = Decimal(dex_buy_quote.price)
+        dex_sell_price = Decimal(dex_sell_quote.price)
+
+        slippage_bps = Decimal(pair_config.max_slippage_bps)
+        safety_multiplier = Decimal(pair_config.edge_safety_multiplier) if pair_config.edge_safety_multiplier is not None else DEFAULT_SAFETY_MULTIPLIER
+        static_threshold = Decimal(pair_config.min_edge_bps)
+        dynamic_min_edge = (CEX_TAKER_FEE_BPS + slippage_bps) * safety_multiplier
+        effective_min_edge = max(static_threshold, dynamic_min_edge)
 
         # --- 計算兩個方向的機會 ---
 
         # 方向 1: 在 CEX 買, 在 DEX 賣 (CEX_to_DEX)
-        edge_bps_1 = (dex_sell_price - cex_ask_price) / cex_ask_price * 10000
-        
-        if edge_bps_1 > pair_config.min_edge_bps:
+        edge_bps_1 = (dex_sell_price - cex_ask_price) / cex_ask_price * TEN_THOUSAND
+
+        if edge_bps_1 >= effective_min_edge:
             opp = self._create_opportunity(
                 pair=pair, direction="CEX_to_DEX", cex_price=cex_ask_price,
-                dex_price=dex_sell_price, edge_bps=edge_bps_1, pair_config=pair_config, size=trade_size
+                dex_price=dex_sell_price, edge_bps=edge_bps_1, pair_config=pair_config,
+                size=trade_size, slippage_bps=slippage_bps
             )
             metrics.opportunities_found.labels(pair=pair.symbol, direction="CEX_to_DEX").inc()
             return opp
 
         # 方向 2: 在 DEX 買, 在 CEX 賣 (DEX_to_CEX)
-        edge_bps_2 = (cex_bid_price - dex_buy_price) / dex_buy_price * 10000
+        edge_bps_2 = (cex_bid_price - dex_buy_price) / dex_buy_price * TEN_THOUSAND
 
-        if edge_bps_2 > pair_config.min_edge_bps:
+        if edge_bps_2 >= effective_min_edge:
             opp = self._create_opportunity(
                 pair=pair, direction="DEX_to_CEX", cex_price=cex_bid_price,
-                dex_price=dex_buy_price, edge_bps=edge_bps_2, pair_config=pair_config, size=trade_size
+                dex_price=dex_buy_price, edge_bps=edge_bps_2, pair_config=pair_config,
+                size=trade_size, slippage_bps=slippage_bps
             )
             metrics.opportunities_found.labels(pair=pair.symbol, direction="DEX_to_CEX").inc()
             return opp
-            
+
         return None
 
-    def _create_opportunity(self, pair: MarketPair, direction: str, cex_price: Decimal, dex_price: Decimal, edge_bps: Decimal, pair_config: PairConfig, size: Decimal) -> Opportunity:
+    def _create_opportunity(
+        self,
+        pair: MarketPair,
+        direction: str,
+        cex_price: Decimal,
+        dex_price: Decimal,
+        edge_bps: Decimal,
+        pair_config: PairConfig,
+        size: Decimal,
+        slippage_bps: Decimal,
+    ) -> Opportunity:
         """輔助函數，用於創建 Opportunity 物件並計算預期 PnL。"""
-        # TODO: 實現更精確的費用和 PnL 計算
-        gas_cost = Decimal("5.0") # 模擬 Gas 費用
-        cex_fee = cex_price * size * Decimal("0.001") # 模擬 CEX 手續費
-        
+
+        gas_cost = ZERO
+        cex_fee_quote = (cex_price * size * CEX_TAKER_FEE_BPS) / TEN_THOUSAND
+
         if direction == "CEX_to_DEX":
-            gross_pnl = (dex_price - cex_price) * size
+            buy_price = cex_price
+            sell_price = dex_price
         else:
-            gross_pnl = (cex_price - dex_price) * size
-            
-        net_pnl = gross_pnl - gas_cost - cex_fee
+            buy_price = dex_price
+            sell_price = cex_price
+
+        gross_pnl = (sell_price - buy_price) * size
+        mid_price = (sell_price + buy_price) / Decimal(2)
+        slippage_cost = (mid_price * size * slippage_bps) / TEN_THOUSAND
+        net_pnl = gross_pnl - cex_fee_quote - slippage_cost - gas_cost
 
         return Opportunity(
             pair=pair,
@@ -108,9 +137,9 @@ class OpportunityDetector:
             dex_chain=pair_config.dex_chain,
             dex_pool_fee=pair_config.dex_pool_fee,
             edge_bps=edge_bps,
-            slippage_bps=Decimal(pair_config.max_slippage_bps),
+            slippage_bps=slippage_bps,
             gas_cost_quote=gas_cost,
-            cex_fee_quote=cex_fee,
+            cex_fee_quote=cex_fee_quote,
             expected_pnl_quote=net_pnl,
             valid_until=asyncio.get_running_loop().time() + 2 # 機會有效期限縮短為 2 秒
         )

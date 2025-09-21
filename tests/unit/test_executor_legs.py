@@ -2,9 +2,14 @@ import asyncio
 import pytest
 from decimal import Decimal
 
+from loguru import logger
+
 from src.core.config import PairConfig
 from src.core.types import MarketPair, Opportunity
-from src.strategy.executor import TransactionExecutor
+from src.strategy.executor import TransactionExecutor, PaperExecutor
+
+CEX_TAKER_FEE_BPS = Decimal("7.5")
+TEN_THOUSAND = Decimal("10000")
 
 
 @pytest.fixture
@@ -18,6 +23,7 @@ def pair_config() -> PairConfig:
         max_size_quote=5000,
         dex_chain="ethereum",
         dex_pool_fee=500,
+        edge_safety_multiplier=Decimal("1.2"),
         price_floor_quote=Decimal("100"),
         price_ceiling_quote=Decimal("10000"),
         max_edge_bps=50000,
@@ -37,13 +43,29 @@ def market_pair(pair_config: PairConfig) -> MarketPair:
 
 def make_opportunity(
     market_pair: MarketPair,
+    pair_config: PairConfig,
     direction: str,
     cex_price: Decimal,
     dex_price: Decimal,
     size: Decimal = Decimal("0.1"),
-    gas_cost: Decimal = Decimal("10"),
-    cex_fee: Decimal = Decimal("5"),
+    gas_cost: Decimal = Decimal("0"),
 ) -> Opportunity:
+    slippage_bps = Decimal(pair_config.max_slippage_bps)
+    cex_fee_quote = (cex_price * size * CEX_TAKER_FEE_BPS) / TEN_THOUSAND
+
+    if direction == "CEX_to_DEX":
+        buy_price = cex_price
+        sell_price = dex_price
+    else:
+        buy_price = dex_price
+        sell_price = cex_price
+
+    edge_bps = (sell_price / buy_price - Decimal(1)) * TEN_THOUSAND
+    gross = size * (sell_price - buy_price)
+    mid_price = (sell_price + buy_price) / Decimal(2)
+    slippage_cost = (mid_price * size * slippage_bps) / TEN_THOUSAND
+    expected_pnl = gross - cex_fee_quote - slippage_cost - gas_cost
+
     return Opportunity(
         pair=market_pair,
         direction=direction,
@@ -52,11 +74,11 @@ def make_opportunity(
         dex_price=dex_price,
         dex_chain=market_pair.dex_chain,
         dex_pool_fee=market_pair.dex_pool_fee,
-        edge_bps=Decimal("0"),
-        slippage_bps=Decimal("5"),
+        edge_bps=edge_bps,
+        slippage_bps=slippage_bps,
         gas_cost_quote=gas_cost,
-        cex_fee_quote=cex_fee,
-        expected_pnl_quote=Decimal("0"),
+        cex_fee_quote=cex_fee_quote,
+        expected_pnl_quote=expected_pnl,
         valid_until=0.0,
     )
 
@@ -65,6 +87,7 @@ def test_dex_to_cex_legs(pair_config: PairConfig, market_pair: MarketPair):
     executor = TransactionExecutor(None, None, None, [pair_config])
     opp = make_opportunity(
         market_pair,
+        pair_config,
         direction="DEX_to_CEX",
         cex_price=Decimal("4500"),
         dex_price=Decimal("4000"),
@@ -74,7 +97,9 @@ def test_dex_to_cex_legs(pair_config: PairConfig, market_pair: MarketPair):
 
     assert [leg.venue for leg in summary.legs] == ["DEX", "CEX"]
     assert [leg.side for leg in summary.legs] == ["buy", "sell"]
-    assert summary.pnl_quote == Decimal("35")
+    assert summary.legs[0].fees_quote == Decimal("0")
+    assert summary.legs[1].fees_quote == Decimal("0.3375")
+    assert summary.pnl_quote == Decimal("49.45")
     assert summary.edge_bps == Decimal("1250")
     assert summary.edge_bps > 0
 
@@ -83,6 +108,7 @@ def test_cex_to_dex_legs(pair_config: PairConfig, market_pair: MarketPair):
     executor = TransactionExecutor(None, None, None, [pair_config])
     opp = make_opportunity(
         market_pair,
+        pair_config,
         direction="CEX_to_DEX",
         cex_price=Decimal("4000"),
         dex_price=Decimal("4500"),
@@ -92,7 +118,9 @@ def test_cex_to_dex_legs(pair_config: PairConfig, market_pair: MarketPair):
 
     assert [leg.venue for leg in summary.legs] == ["CEX", "DEX"]
     assert [leg.side for leg in summary.legs] == ["buy", "sell"]
-    assert summary.pnl_quote == Decimal("35")
+    assert summary.legs[0].fees_quote == Decimal("0.3")
+    assert summary.legs[1].fees_quote == Decimal("0")
+    assert summary.pnl_quote == Decimal("49.4875")
     assert summary.edge_bps == Decimal("1250")
     assert summary.edge_bps > 0
 
@@ -101,6 +129,7 @@ def test_invalid_price_rejected(pair_config: PairConfig, market_pair: MarketPair
     executor = TransactionExecutor(None, None, None, [pair_config])
     opp = make_opportunity(
         market_pair,
+        pair_config,
         direction="DEX_to_CEX",
         cex_price=Decimal("4500"),
         dex_price=Decimal("0.0002"),
@@ -111,3 +140,27 @@ def test_invalid_price_rejected(pair_config: PairConfig, market_pair: MarketPair
     assert summary.legs == []
     assert summary.pnl_quote == Decimal("0")
     assert summary.edge_bps == Decimal("0")
+
+
+def test_paper_executor_log_format(pair_config: PairConfig, market_pair: MarketPair):
+    paper = PaperExecutor([pair_config])
+    opp = make_opportunity(
+        market_pair,
+        pair_config,
+        direction="DEX_to_CEX",
+        cex_price=Decimal("4500"),
+        dex_price=Decimal("4000"),
+    )
+
+    captured = []
+    handler_id = logger.add(lambda msg: captured.append(str(msg)), format="{message}")
+    try:
+        summary = asyncio.run(paper.run(opp))
+    finally:
+        logger.remove(handler_id)
+
+    assert summary.legs
+
+    paper_logs = [msg for msg in captured if "[PAPER MODE] 偵測到機會" in msg]
+    assert paper_logs, "應該捕捉到紙上交易機會的日誌"
+    assert all("%s" not in log_msg and "%.4f" not in log_msg for log_msg in paper_logs)

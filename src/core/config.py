@@ -93,6 +93,7 @@ class PairConfig(BaseModel):
     price_floor_quote: Optional[Decimal] = None
     price_ceiling_quote: Optional[Decimal] = None
     max_edge_bps: Optional[int] = None
+    edge_safety_multiplier: Optional[Decimal] = None
 
 class SecretsConfig(BaseModel):
     binance_api_key: SecretStr

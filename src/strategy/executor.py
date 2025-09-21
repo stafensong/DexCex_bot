@@ -55,7 +55,7 @@ def build_legs(opp: Opportunity) -> List[ExecutionLeg]:
             side="buy",
             price_quote=opp.dex_price,
             size=opp.size,
-            fees_quote=opp.gas_cost_quote,
+            fees_quote=ZERO,
         )
         cex_leg = ExecutionLeg(
             venue="CEX",
@@ -78,7 +78,7 @@ def build_legs(opp: Opportunity) -> List[ExecutionLeg]:
         side="sell",
         price_quote=opp.dex_price,
         size=opp.size,
-        fees_quote=opp.gas_cost_quote,
+        fees_quote=ZERO,
     )
     return [cex_leg, dex_leg]
 
@@ -91,7 +91,9 @@ def compute_edge(buy_price: Decimal, sell_price: Decimal) -> Decimal:
 
 def compute_pnl(opp: Opportunity, buy_price: Decimal, sell_price: Decimal) -> Decimal:
     gross = opp.size * (sell_price - buy_price)
-    return gross - opp.gas_cost_quote - opp.cex_fee_quote
+    mid_price = (sell_price + buy_price) / Decimal(2)
+    slippage_cost = (mid_price * opp.size * opp.slippage_bps) / TEN_THOUSAND
+    return gross - opp.cex_fee_quote - slippage_cost - opp.gas_cost_quote
 
 
 def evaluate_opportunity(
@@ -134,7 +136,7 @@ class TransactionExecutor:
     - `DEX_to_CEX`: 先在 DEX `buy` base，再在 CEX `sell` base。
     - `CEX_to_DEX`: 先在 CEX `buy` base，再在 DEX `sell` base。
     `ExecutionLeg.price_quote` 皆為「報價幣 / base」價格，`ExecutionLeg.size` 始終是 base 數量。
-    PnL 計算: `size * (sell_px - buy_px) - gas_cost_quote - cex_fee_quote`。
+    PnL 計算: `size * (sell_px - buy_px) - cex_fee_quote - slippage_cost_quote - gas_cost_quote`。
     模組同時套用可配置的價格／edge sanity check，以避免異常資料污染計算。
     """
 
@@ -242,7 +244,7 @@ class PaperExecutor:
             )
 
         logger.info(
-            "[PAPER MODE] 偵測到機會: %s %s | CEX=%.4f | DEX=%.4f | PnL=%.4f",
+            "[PAPER MODE] 偵測到機會: {} {} | CEX={:.4f} | DEX={:.4f} | PnL={:.4f}",
             opp.direction,
             opp.pair.symbol,
             float(opp.cex_price),

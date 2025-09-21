@@ -50,8 +50,8 @@
 - `DEX_to_CEX`：先在 DEX 以 `buy` 取得 base，再到 CEX 以 `sell` 釋出 base。
 - `CEX_to_DEX`：先在 CEX `buy` base，再在 DEX `sell` base。
 - 每條 `ExecutionLeg.price_quote` 都是「報價貨幣 / base」的價格，`ExecutionLeg.size` 始終是 base 數量，可直接與 CEX 報價比較。
-- 損益計算公式：`PnL = size * (sell_px - buy_px) - gas_cost_quote - cex_fee_quote`。
-- Executor 內建價格與 edge 的 sanity check，閾值可在 `config/pairs.yaml` 的 `price_floor_quote`、`price_ceiling_quote`、`max_edge_bps` 調整，以避免異常行情污染統計。
+- 損益計算公式：`PnL = size * (sell_px - buy_px) - cex_fee_quote - slippage_cost_quote - gas_cost_quote`，其中 CEX taker fee 固定 7.5 bps、slippage 來自 pair 設定。
+- Executor 內建價格與 edge 的 sanity check，並會依據 taker/slippage 動態調整 `min_edge_bps` 門檻；相關閾值可在 `config/pairs.yaml` 的 `price_floor_quote`、`price_ceiling_quote`、`max_edge_bps` 與 `edge_safety_multiplier` 調整，以避免異常行情污染統計。
 
 ## 安裝與設定
 

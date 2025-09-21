@@ -47,14 +47,15 @@ cex:
   api_key_env: "BINANCE_API_KEY"
   api_secret_env: "BINANCE_API_SECRET"
   recv_window_ms: 5000
+  # 在 src/strategy/detector.py:13 定義 7.5 bps taker 費 (0.075%)
 
 # 風險與部位管理
 risk:
   max_notional_per_leg_quote: 10000  # 單邊交易名義本金上限 (以報價貨幣計)
-  max_position_per_asset: 2.0      # 單一資產 (如 ETH) 的最大庫存量
-  circuit_breaker_bps: 250         # 當實際成交價與預期價差超過 2.5%，觸發熔斷
-  cancel_all_on_start: true        # 啟動時取消所有掛單
-  cancel_all_on_shutdown: true     # 關閉時取消所有掛單
+  max_position_per_asset: 2.0        # 單一資產 (如 ETH) 的最大庫存量
+  circuit_breaker_bps: 250           # 當實際成交價與預期價差超過 2.5%，觸發熔斷
+  cancel_all_on_start: true          # 啟動時取消所有掛單
+  cancel_all_on_shutdown: true       # 關閉時取消所有掛單
 
 # 庫存再平衡
 inventory:
