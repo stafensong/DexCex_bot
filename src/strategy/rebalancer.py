@@ -30,8 +30,13 @@ class Rebalancer:
         base_asset = pair_config.base
         quote_asset = pair_config.quote
         market_pair = MarketPair(
-            base=base_asset, quote=quote_asset, symbol=pair_config.cex_symbol, 
-            dex_chain=pair_config.dex_chain, dex_pool_fee=pair_config.dex_pool_fee
+            base=base_asset,
+            quote=quote_asset,
+            symbol=pair_config.cex_symbol,
+            dex_chain=pair_config.dex_chain,
+            dex_pool_fee=pair_config.dex_pool_fee,
+            base_precision=pair_config.base_precision if pair_config.base_precision is not None else 8,
+            quote_precision=pair_config.quote_precision if pair_config.quote_precision is not None else 8,
         )
 
         # 1. 獲取餘額和價格

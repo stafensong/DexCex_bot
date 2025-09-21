@@ -20,6 +20,8 @@ def mock_pair_config() -> PairConfig:
         dex_chain="ethereum",
         dex_pool_fee=500,
         edge_safety_multiplier=Decimal("1.2"),
+        base_precision=4,
+        quote_precision=2,
     )
 
 # 模擬的 MarketPair
@@ -31,6 +33,8 @@ def market_pair() -> MarketPair:
         symbol="ETH/USDT",
         dex_chain="ethereum",
         dex_pool_fee=500,
+        base_precision=4,
+        quote_precision=2,
     )
 
 # 模擬的 CEX 和 DEX 客戶端

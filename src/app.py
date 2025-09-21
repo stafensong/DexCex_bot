@@ -6,6 +6,7 @@ from .core.config import load_config, AppConfig
 from .core.types import MarketPair
 from .infra.logging import setup_logging
 from .infra.metrics import setup_metrics
+from .infra.dashboard import DashboardPublisher
 from .exchange.binance import BinanceCexClient
 from .exchange.univ3 import UniV3DexClient
 from .strategy.detector import OpportunityDetector
@@ -23,16 +24,24 @@ class ArbiBotApp:
         self.metrics_server = setup_metrics(config.observability)
         self.running = False
         self.mode = mode
+        self.dashboard_publisher = None
 
         # 初始化核心組件
         pairs = [MarketPair(
-            base=p.base, 
-            quote=p.quote, 
-            symbol=p.cex_symbol, 
-            dex_chain=p.dex_chain, 
-            dex_pool_fee=p.dex_pool_fee
+            base=p.base,
+            quote=p.quote,
+            symbol=p.cex_symbol,
+            dex_chain=p.dex_chain,
+            dex_pool_fee=p.dex_pool_fee,
+            base_precision=p.base_precision if p.base_precision is not None else 8,
+            quote_precision=p.quote_precision if p.quote_precision is not None else 8,
         ) for p in config.pairs]
-        self.cex_client = BinanceCexClient(config.cex, config.secrets, pairs)
+        if config.dashboard.enabled:
+            self.dashboard_publisher = DashboardPublisher(
+                config.dashboard.redis_url,
+                config.dashboard.channel,
+            )
+        self.cex_client = BinanceCexClient(config.cex, config.secrets, pairs, dashboard_publisher=self.dashboard_publisher)
         self.dex_client = UniV3DexClient(config.dex, config.network, config.secrets, config.tokens)
         self.risk_manager = RiskManager(config.risk)
         self.detector = OpportunityDetector(self.cex_client, self.dex_client, config.pairs)
@@ -99,4 +108,6 @@ class ArbiBotApp:
         await self.cex_client.close()
         # if self.metrics_server: # Prometheus server is a daemon, no need to stop explicitly
         #     await self.metrics_server.stop()
+        if self.dashboard_publisher:
+            await self.dashboard_publisher.close()
         self.logger.info("機器人已安全關閉。")

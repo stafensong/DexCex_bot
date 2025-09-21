@@ -44,14 +44,16 @@
 3.  **產生機會**: 當價差超過 `min_edge_bps` 時，創建一個 `Opportunity` 物件。
 4.  **執行交易**: `TransactionExecutor` 接收 `Opportunity`，產生標準化的 CEX/DEX legs 並即時計算 PnL 與 sanity check。
 5.  **狀態更新**: `ExecutionSummary` 被發送到 `RiskManager`，後者更新倉位和 PnL，並透過 `storage.py` 將狀態持久化。
+6.  **成交回補**: `BinanceCexClient` 訂閱 User Data Stream，取得即時 `executionReport` 成交事件，並將資訊推送至 Redis/dashboard，供真實損益與監控使用。
 
 #### 交易腿與損益計算
 
 - `DEX_to_CEX`：先在 DEX 以 `buy` 取得 base，再到 CEX 以 `sell` 釋出 base。
 - `CEX_to_DEX`：先在 CEX `buy` base，再在 DEX `sell` base。
 - 每條 `ExecutionLeg.price_quote` 都是「報價貨幣 / base」的價格，`ExecutionLeg.size` 始終是 base 數量，可直接與 CEX 報價比較。
-- 損益計算公式：`PnL = size * (sell_px - buy_px) - cex_fee_quote - slippage_cost_quote - gas_cost_quote`，其中 CEX taker fee 固定 7.5 bps、slippage 來自 pair 設定。
+- 損益計算公式：`PnL = size * (sell_px - buy_px) - cex_fee_quote - slippage_cost_quote - gas_cost_quote`，其中 CEX taker fee 固定 7.5 bps、slippage 來自 pair 設定；若使用限價單，可直接套用偵測得到的價格並依交易對精度下單。
 - Executor 內建價格與 edge 的 sanity check，並會依據 taker/slippage 動態調整 `min_edge_bps` 門檻；相關閾值可在 `config/pairs.yaml` 的 `price_floor_quote`、`price_ceiling_quote`、`max_edge_bps` 與 `edge_safety_multiplier` 調整，以避免異常行情污染統計。
+- Binance 端提供 User Data Stream 成交更新，可取得實際成交量與價格；如需對沖或更精細的 PnL，建議在主網以限價單為主，並在 `config/pairs.yaml` 中設定正確的 `base_precision`/`quote_precision`（對應 Binance 的 `stepSize` / `tickSize`）。
 
 ## 安裝與設定
 
@@ -100,7 +102,7 @@ DEX_WALLET_PRIVATE_KEY="0x..."
 
 #### 第二步：通用與交易對設定 (config/default.yaml, config/pairs.yaml)
 
-- **`config/default.yaml`**: 設定全局參數，如風險限制、再平衡策略、DEX 的通用合約地址 (Router/Quoter) 等。
+- **`config/default.yaml`**: 設定全局參數，如風險限制、CEX mainnet/testnet、再平衡策略、DEX 的通用合約地址 (Router/Quoter) 等。
 - **`config/pairs.yaml`**: 設定您想要監控的交易對。每個交易對都需要指定 `base` (基礎貨幣), `quote` (報價貨幣), `dex_chain` (該交易對應的 DEX 所在鏈) 等。
 
 #### 第三步：新增鏈或代幣 (config/tokens.yaml)

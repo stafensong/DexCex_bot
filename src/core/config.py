@@ -81,6 +81,11 @@ class ObservabilityConfig(BaseModel):
     log_level: str
     redact_keys: List[str]
 
+class DashboardConfig(BaseModel):
+    enabled: bool = False
+    redis_url: str = "redis://localhost:6379/0"
+    channel: str = "bot_dashboard_channel"
+
 class PairConfig(BaseModel):
     base: str
     quote: str
@@ -94,6 +99,8 @@ class PairConfig(BaseModel):
     price_ceiling_quote: Optional[Decimal] = None
     max_edge_bps: Optional[int] = None
     edge_safety_multiplier: Optional[Decimal] = None
+    base_precision: Optional[int] = None
+    quote_precision: Optional[int] = None
 
 class SecretsConfig(BaseModel):
     binance_api_key: SecretStr
@@ -128,6 +135,7 @@ class AppConfig(BaseModel):
     risk: RiskConfig
     inventory: InventoryConfig
     observability: ObservabilityConfig
+    dashboard: DashboardConfig
     pairs: List[PairConfig]
     tokens: Dict[str, Dict[str, TokenDetails]]
     secrets: SecretsConfig = Field(default_factory=SecretsConfig.load)

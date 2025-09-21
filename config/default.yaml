@@ -38,16 +38,26 @@ dex:
       quoter_v2: "0x78D78E420Da98ad378D7799bE8f4AF69033EB077"
       weth: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
 
-# CEX 設定
+# CEX 設定 (mainnet)
+# cex:
+#   name: "binance"
+#   base_url: "https://api.binance.com"
+#   ws_url: "wss://stream.binance.com:9443/ws"
+#   # API 金鑰將從 .env 文件中讀取
+#   api_key_env: "BINANCE_API_KEY"
+#   api_secret_env: "BINANCE_API_SECRET"
+#   recv_window_ms: 5000
+#   # 在 src/strategy/detector.py:13 定義 7.5 bps taker 費 (0.075%)
+
+# CEX 設定 (testnet)
 cex:
-  name: "binance"
-  base_url: "https://api.binance.com"
-  ws_url: "wss://stream.binance.com:9443/ws"
+  name: "binance-testnet"
+  base_url: "https://testnet.binance.vision"
+  ws_url: "wss://testnet.binance.vision/ws"
   # API 金鑰將從 .env 文件中讀取
   api_key_env: "BINANCE_API_KEY"
   api_secret_env: "BINANCE_API_SECRET"
   recv_window_ms: 5000
-  # 在 src/strategy/detector.py:13 定義 7.5 bps taker 費 (0.075%)
 
 # 風險與部位管理
 risk:
@@ -71,3 +81,8 @@ observability:
   log_level: "INFO"
   # 日誌脫敏，會遮蔽包含這些關鍵字的欄位
   redact_keys: ["key", "secret", "token", "password", "private_key"]
+
+dashboard:
+  enabled: true
+  redis_url: "redis://localhost:6379/0"
+  channel: "bot_dashboard_channel"

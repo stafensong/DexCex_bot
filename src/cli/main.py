@@ -72,11 +72,13 @@ def rebalance(paper_run: bool = typer.Option(False, "--paper-run", help="執行�
     async def main():
         # 為再平衡任務建立專用的 CEX 客戶端
         pairs = [MarketPair(
-            base=p.base, 
-            quote=p.quote, 
-            symbol=p.cex_symbol, 
-            dex_chain=p.dex_chain, 
-            dex_pool_fee=p.dex_pool_fee
+            base=p.base,
+            quote=p.quote,
+            symbol=p.cex_symbol,
+            dex_chain=p.dex_chain,
+            dex_pool_fee=p.dex_pool_fee,
+            base_precision=p.base_precision if p.base_precision is not None else 8,
+            quote_precision=p.quote_precision if p.quote_precision is not None else 8,
         ) for p in config.pairs]
         cex_client = BinanceCexClient(config.cex, config.secrets, pairs)
         await cex_client.connect()

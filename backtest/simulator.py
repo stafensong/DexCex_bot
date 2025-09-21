@@ -99,7 +99,9 @@ class Simulator:
             quote=self.pair_config.quote, 
             symbol=self.pair_config.cex_symbol,
             dex_chain=self.pair_config.dex_chain,
-            dex_pool_fee=self.pair_config.dex_pool_fee
+            dex_pool_fee=self.pair_config.dex_pool_fee,
+            base_precision=self.pair_config.base_precision if self.pair_config.base_precision is not None else 8,
+            quote_precision=self.pair_config.quote_precision if self.pair_config.quote_precision is not None else 8,
         )
 
         # 初始化模擬客戶端

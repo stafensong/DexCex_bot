@@ -27,6 +27,8 @@ def pair_config() -> PairConfig:
         price_floor_quote=Decimal("100"),
         price_ceiling_quote=Decimal("10000"),
         max_edge_bps=50000,
+        base_precision=4,
+        quote_precision=2,
     )
 
 
@@ -38,6 +40,8 @@ def market_pair(pair_config: PairConfig) -> MarketPair:
         symbol=pair_config.cex_symbol,
         dex_chain=pair_config.dex_chain,
         dex_pool_fee=pair_config.dex_pool_fee,
+        base_precision=pair_config.base_precision,
+        quote_precision=pair_config.quote_precision,
     )
 
 
