@@ -1,9 +1,10 @@
 import os
 import yaml
 from decimal import Decimal
-from typing import List, Dict, Literal, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Set
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -48,6 +49,7 @@ class DexContracts(BaseModel):
     router: str
     quoter_v2: str
     weth: str
+    factory: Optional[str] = None
 
 class DexConfig(BaseModel):
     uniswap_v3: Dict[str, DexContracts]
@@ -85,6 +87,102 @@ class DashboardConfig(BaseModel):
     enabled: bool = False
     redis_url: str = "redis://localhost:6379/0"
     channel: str = "bot_dashboard_channel"
+
+
+class VolumeScannerConfig(BaseModel):
+    enabled: bool = True
+    quote_assets: List[str] = Field(default_factory=lambda: ["USDT", "USDC"])
+    lookback_hours: int = 24
+    anomaly_multiplier: float = 3.0
+    min_hourly_quote_volume: float = 500000.0
+    max_candidates: int = 20
+    preferred_chains: List[str] = Field(default_factory=lambda: ["ethereum", "arbitrum", "base"])
+    preferred_fee_tiers: List[int] = Field(default_factory=lambda: [500, 3000, 10000])
+    persist_path: str = "data/discovered_pairs.yaml"
+    cooldown_hours: int = 6
+    default_pair_params: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode='after')
+    def validate_parameters(self) -> 'VolumeScannerConfig':
+        if self.lookback_hours < 1:
+            raise ValueError("lookback_hours 必須大於等於 1")
+        if self.anomaly_multiplier < 1:
+            raise ValueError("anomaly_multiplier 必須大於等於 1")
+        if self.max_candidates < 1:
+            raise ValueError("max_candidates 必須大於等於 1")
+        if self.min_hourly_quote_volume < 0:
+            raise ValueError("min_hourly_quote_volume 不可為負數")
+        return self
+
+
+class SpikeArbitrageConfig(BaseModel):
+    edge_threshold_bps: float = 30.0
+    cost_buffer_bps: float = 15.0
+    probe_size_base: float = 1.0
+    dex_chains: List[str] = Field(default_factory=lambda: ["ethereum", "arbitrum", "base"])
+    dex_fee_tiers: List[int] = Field(default_factory=lambda: [500, 3000, 10000])
+
+    @model_validator(mode='after')
+    def validate_params(self) -> 'SpikeArbitrageConfig':
+        if self.edge_threshold_bps < 0:
+            raise ValueError("edge_threshold_bps 不可為負數")
+        if self.cost_buffer_bps < 0:
+            raise ValueError("cost_buffer_bps 不可為負數")
+        if self.probe_size_base <= 0:
+            raise ValueError("probe_size_base 必須大於 0")
+        if not self.dex_chains:
+            raise ValueError("dex_chains 至少需要一個鏈")
+        if not self.dex_fee_tiers:
+            raise ValueError("dex_fee_tiers 至少需要一個費率等級")
+        return self
+
+
+class AutoDiscoveryConfig(BaseModel):
+    enabled: bool = True
+    quote_asset: str = "USDT"
+    lookback_hours: int = 2
+    ratio_threshold: float = 1.5
+    scan_interval_minutes: int = 30
+    max_candidates: int = 10
+    concurrency: int = 20
+    persist_path: str = "data/auto_discovery.json"
+    missing_tokens_path: str = "data/missing_tokens.json"
+    dex_pool_dataset: str = "data/target_pools_Dex.json"
+    target_quote_currencies: List[str] = Field(default_factory=lambda: ["USDT", "USDC"])
+    arbitrage: SpikeArbitrageConfig = Field(default_factory=SpikeArbitrageConfig)
+
+
+class VolumeSpikeConfig(BaseModel):
+    enabled: bool = True
+    quote_asset: str = "USDT"
+    lookback_hours: int = 2
+    ratio_threshold: float = 1.5
+    scan_interval_minutes: int = 30
+    persist_path: str = "data/volume_spikes.json"
+    max_candidates: int = 10
+    concurrency: int = 20
+    arbitrage: SpikeArbitrageConfig = Field(default_factory=SpikeArbitrageConfig)
+
+    @model_validator(mode='after')
+    def validate_spike_config(self) -> 'VolumeSpikeConfig':
+        if self.lookback_hours < 2:
+            raise ValueError("lookback_hours 需至少包含當前與前一小時，建議 >= 2")
+        if self.ratio_threshold <= 1:
+            raise ValueError("ratio_threshold 必須大於 1")
+        if self.scan_interval_minutes <= 0:
+            raise ValueError("scan_interval_minutes 必須大於 0")
+        if self.max_candidates < 1:
+            raise ValueError("max_candidates 必須大於 0")
+        if self.concurrency < 1:
+            raise ValueError("concurrency 必須大於 0")
+        return self
+
+
+class ScannerConfig(BaseModel):
+    volume: VolumeScannerConfig = Field(default_factory=VolumeScannerConfig)
+    spike: VolumeSpikeConfig = Field(default_factory=VolumeSpikeConfig)
+    auto_discovery: Optional[AutoDiscoveryConfig] = None
+
 
 class PairConfig(BaseModel):
     base: str
@@ -139,12 +237,15 @@ class AppConfig(BaseModel):
     pairs: List[PairConfig]
     tokens: Dict[str, Dict[str, TokenDetails]]
     secrets: SecretsConfig = Field(default_factory=SecretsConfig.load)
+    scanner: ScannerConfig = Field(default_factory=ScannerConfig)
 
 
 def load_config(
     default_path: str = "config/default.yaml",
     pairs_path: str = "config/pairs.yaml",
-    tokens_path: str = "config/tokens.yaml"
+    tokens_path: str = "config/tokens.yaml",
+    scanner_path: str = "config/scanner.yaml",
+    discovered_pairs_path: str = "data/discovered_pairs.yaml"
 ) -> AppConfig:
     """Loads configuration from YAML files and environment variables."""
     load_dotenv()
@@ -152,12 +253,62 @@ def load_config(
     default_cfg_data = load_yaml_with_env(default_path)
     pairs_cfg_data = load_yaml_with_env(pairs_path)
     tokens_cfg_data = load_yaml_with_env(tokens_path)
+    scanner_cfg_data = load_yaml_with_env(scanner_path) if Path(scanner_path).exists() else {}
 
     # Combine data
     full_config_data = {**default_cfg_data, **pairs_cfg_data, **tokens_cfg_data}
+    if scanner_cfg_data:
+        # The content of scanner.yaml is expected to be nested under a 'scanner' key.
+        # We merge this with any existing scanner config from the default yaml.
+        default_scanner_conf = full_config_data.get('scanner', {})
+        scanner_yaml_conf = scanner_cfg_data.get('scanner', {})
+        default_scanner_conf.update(scanner_yaml_conf)
+        full_config_data['scanner'] = default_scanner_conf
 
     # Parse with Pydantic
-    return AppConfig(**full_config_data)
+    config = AppConfig(**full_config_data)
+
+    # Load dynamically discovered pairs, if any
+    discovered_pairs_file = Path(discovered_pairs_path)
+    if discovered_pairs_file.exists():
+        try:
+            discovered_data = load_yaml_with_env(str(discovered_pairs_file))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"載入動態 pairs 檔案失敗: {exc}")
+            return config
+
+        if not discovered_data:
+            return config
+
+        raw_pairs = discovered_data.get('pairs', [])
+        if not isinstance(raw_pairs, list):
+            logger.warning("動態 pairs 檔案格式不正確，預期為 list。")
+            return config
+
+        existing_symbols: Set[str] = {p.cex_symbol for p in config.pairs}
+        for entry in raw_pairs:
+            if not isinstance(entry, dict):
+                logger.warning(f"忽略不正確的 pair 記錄: {entry}")
+                continue
+            pair_data = entry.get('config') if isinstance(entry, dict) else None
+            if pair_data is None:
+                pair_data = entry
+            if not isinstance(pair_data, dict):
+                logger.warning(f"忽略無法解析的 pair 設定: {entry}")
+                continue
+
+            try:
+                pair_cfg = PairConfig(**pair_data)
+            except ValidationError as exc:
+                logger.warning(f"動態 pair 設定驗證失敗: {exc}")
+                continue
+
+            if pair_cfg.cex_symbol in existing_symbols:
+                continue
+            config.pairs.append(pair_cfg)
+            existing_symbols.add(pair_cfg.cex_symbol)
+
+    return config
 
 # Example usage:
 if __name__ == '__main__':

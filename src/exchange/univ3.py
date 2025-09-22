@@ -40,17 +40,70 @@ class UniV3DexClient(DexClient):
         self.quoter_abi = _load_abi("ABI/quoter.json")
         self.router_abi = _load_abi("ABI/router.json")
         self.erc20_abi = _load_abi("ABI/erc20.json")
+        try:
+            self.factory_abi = _load_abi("ABI/factory.json")
+        except Exception:
+            self.factory_abi = None
+            logger.debug("未載入 Uniswap V3 factory ABI，部分功能將不可用。")
+        self._factory_contracts: Dict[str, 'web3.contract.Contract'] = {}
         logger.info(f"UniV3DexClient 初始化，地址: {self.user_address}，支援的鏈: {list(self.w3_instances.keys())}")
 
     def _get_w3(self, chain: str) -> Web3:
         if chain not in self.w3_instances:
             raise ValueError(f"不支援的鏈或 RPC URL 未設定: {chain}")
         return self.w3_instances[chain]
-    
+
+    def _get_factory_contract(self, chain: str):
+        if not self.factory_abi:
+            raise ValueError("未載入 factory ABI，無法檢查池子存在與否。")
+        if chain not in self.dex_config.uniswap_v3:
+            raise ValueError(f"在設定中找不到鏈 {chain} 的 DEX 合約資訊。")
+
+        contracts = self.dex_config.uniswap_v3[chain]
+        if not getattr(contracts, 'factory', None):
+            raise ValueError(f"鏈 {chain} 未設定 Uniswap V3 factory 地址。")
+
+        if chain not in self._factory_contracts:
+            factory_address = Web3.to_checksum_address(contracts.factory)
+            factory_contract = self._get_w3(chain).eth.contract(address=factory_address, abi=self.factory_abi)
+            self._factory_contracts[chain] = factory_contract
+        return self._factory_contracts[chain]
+
     def _get_token_details(self, symbol: str, chain: str) -> 'TokenDetails':
         if symbol not in self.tokens_config or chain not in self.tokens_config[symbol]:
             raise ValueError(f"在 {chain} 上找不到代幣 {symbol} 的地址設定。")
         return self.tokens_config[symbol][chain]
+
+    async def get_pool_address(self, base_symbol: str, quote_symbol: str, chain: str, fee: int) -> Optional[str]:
+        """Return the pool address for the given token pair and fee tier if it exists."""
+        try:
+            factory = self._get_factory_contract(chain)
+        except ValueError as exc:
+            logger.debug(f"取用 factory 合約失敗: {exc}")
+            return None
+
+        try:
+            base = self._get_token_details(base_symbol, chain)
+            quote = self._get_token_details(quote_symbol, chain)
+        except ValueError as exc:
+            logger.debug(f"取得代幣資訊失敗: {exc}")
+            return None
+
+        token_a = Web3.to_checksum_address(base.address)
+        token_b = Web3.to_checksum_address(quote.address)
+
+        def _call() -> str:
+            return factory.functions.getPool(token_a, token_b, int(fee)).call()
+
+        try:
+            pool_address = await asyncio.to_thread(_call)
+        except Exception as exc:
+            logger.warning(f"查詢 Uniswap pool 失敗 ({base_symbol}/{quote_symbol} {chain} fee={fee}): {exc}")
+            return None
+
+        if pool_address and int(pool_address, 16) != 0:
+            return Web3.to_checksum_address(pool_address)
+        return None
 
     async def get_balance(self, asset: str, chain: str) -> Decimal:
         """查詢特定代幣在特定鏈上的錢包餘額。"""
@@ -97,61 +150,65 @@ class UniV3DexClient(DexClient):
         try:
             fee = int(pair.dex_pool_fee)
 
+            # --- Token Details Resolution ---
+            # Prioritize dynamically passed details, otherwise fallback to config
+            if pair.base_address and pair.base_decimals is not None:
+                base_addr = pair.base_address
+                base_decimals = pair.base_decimals
+            else:
+                base_details = self._get_token_details(pair.base, pair.dex_chain)
+                base_addr = base_details.address
+                base_decimals = base_details.decimals
+
+            if pair.quote_address and pair.quote_decimals is not None:
+                quote_addr = pair.quote_address
+                quote_decimals = pair.quote_decimals
+            else:
+                quote_details = self._get_token_details(pair.quote, pair.dex_chain)
+                quote_addr = quote_details.address
+                quote_decimals = quote_details.decimals
+            # --- End Token Details Resolution ---
+
             if side == 'sell':
                 # ---- 賣 base：exact input ----
-                base = self._get_token_details(pair.base, pair.dex_chain)
-                quote = self._get_token_details(pair.quote, pair.dex_chain)
+                token_in  = Web3.to_checksum_address(base_addr)
+                token_out = Web3.to_checksum_address(quote_addr)
+                amount_in = int(Decimal(size) * (10 ** base_decimals))
+                if amount_in <= 0: return None
 
-                token_in  = Web3.to_checksum_address(base.address)
-                token_out = Web3.to_checksum_address(quote.address)
-
-                amount_in = int(Decimal(size) * (10 ** base.decimals))
-                if amount_in <= 0:
-                    return None
-
-                # V2: (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
                 params_in = (token_in, token_out, int(amount_in), fee, 0)
                 out = await asyncio.to_thread(lambda: quoter.functions.quoteExactInputSingle(params_in).call())
-                amount_out_wei = out[0]  # quote out
+                amount_out_wei = out[0]
 
-                quote_out = Decimal(amount_out_wei) / (Decimal(10) ** quote.decimals)
-                if size == 0:
-                    return None
-                price_q_per_b = quote_out / Decimal(size)  # quote per base
+                quote_out = Decimal(amount_out_wei) / (Decimal(10) ** quote_decimals)
+                if size == 0: return None
+                price_q_per_b = quote_out / Decimal(size)
 
-            else:
+            else: # side == 'buy'
                 # ---- 買 base：exact output ----
-                base = self._get_token_details(pair.base, pair.dex_chain)
-                quote = self._get_token_details(pair.quote, pair.dex_chain)
+                token_in  = Web3.to_checksum_address(quote_addr)
+                token_out = Web3.to_checksum_address(base_addr)
+                amount_out = int(Decimal(size) * (10 ** base_decimals))
+                if amount_out <= 0: return None
 
-                token_in  = Web3.to_checksum_address(quote.address)  # 我們要花 quote
-                token_out = Web3.to_checksum_address(base.address)   # 拿到 base
-
-                amount_out = int(Decimal(size) * (10 ** base.decimals))  # 想要拿到這麼多 base
-                if amount_out <= 0:
-                    return None
-
-                # V2: quoteExactOutputSingle((tokenIn, tokenOut, amount, fee, sqrtPriceLimitX96))
                 params_out = (token_in, token_out, int(amount_out), fee, 0)
                 out = await asyncio.to_thread(lambda: quoter.functions.quoteExactOutputSingle(params_out).call())
-                amount_in_wei = out[0]  # 需要投入多少 quote
+                amount_in_wei = out[0]
 
-                quote_in = Decimal(amount_in_wei) / (Decimal(10) ** quote.decimals)
-                if size == 0:
-                    return None
-                price_q_per_b = quote_in / Decimal(size)  # quote per base
+                quote_in = Decimal(amount_in_wei) / (Decimal(10) ** quote_decimals)
+                if size == 0: return None
+                price_q_per_b = quote_in / Decimal(size)
 
-            # 合理性過濾（ETH/USDT 可按需調整範圍）
-            if not (Decimal("100") <= price_q_per_b <= Decimal("10000")):
-                logger.debug(f"丟棄不合理 DEX 價: {price_q_per_b} ({pair.symbol} on {pair.dex_chain}, side={side})")
-                return None
+            # 合理性過濾
+            if not (Decimal("1e-18") < price_q_per_b < Decimal("1e18")):
+                 logger.debug(f"丟棄不合理 DEX 價: {price_q_per_b} ({pair.symbol} on {pair.dex_chain}, side={side})")
+                 return None
 
-            # 回傳（若主程式用 float 聚合，可在這裡轉 float）
             return Quote(
                 pair=pair,
                 side=side,
-                price=price_q_per_b,   # Decimal；如需：float(price_q_per_b)
-                size=size,             # Decimal；如需：float(size)
+                price=price_q_per_b,
+                size=size,
                 venue="DEX",
                 timestamp=time.time(),
             )

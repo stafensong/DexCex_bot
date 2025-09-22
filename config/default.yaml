@@ -25,39 +25,43 @@ dex:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
       quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
       weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
     arbitrum:
       router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
       quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
       weth: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
     base:
       router: "0x2626664c2603336E57B271c5C0b26F421741e481"
       quoter_v2: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
       weth: "0x4200000000000000000000000000000000000006"
+      factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
     bsc:
       router: "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2"
       quoter_v2: "0x78D78E420Da98ad378D7799bE8f4AF69033EB077"
       weth: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+      factory: "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7"
 
 # CEX 設定 (mainnet)
-# cex:
-#   name: "binance"
-#   base_url: "https://api.binance.com"
-#   ws_url: "wss://stream.binance.com:9443/ws"
-#   # API 金鑰將從 .env 文件中讀取
-#   api_key_env: "BINANCE_API_KEY"
-#   api_secret_env: "BINANCE_API_SECRET"
-#   recv_window_ms: 5000
-#   # 在 src/strategy/detector.py:13 定義 7.5 bps taker 費 (0.075%)
-
-# CEX 設定 (testnet)
 cex:
-  name: "binance-testnet"
-  base_url: "https://testnet.binance.vision"
-  ws_url: "wss://testnet.binance.vision/ws"
+  name: "binance"
+  base_url: "https://api.binance.com"
+  ws_url: "wss://stream.binance.com:9443/ws"
   # API 金鑰將從 .env 文件中讀取
   api_key_env: "BINANCE_API_KEY"
   api_secret_env: "BINANCE_API_SECRET"
   recv_window_ms: 5000
+  # 在 src/strategy/detector.py:13 定義 7.5 bps taker 費 (0.075%)
+
+# CEX 設定 (testnet)
+# cex:
+#   name: "binance-testnet"
+#   base_url: "https://testnet.binance.vision"
+#   ws_url: "wss://testnet.binance.vision/ws"
+#   # API 金鑰將從 .env 文件中讀取
+#   api_key_env: "BINANCE_API_KEY"
+#   api_secret_env: "BINANCE_API_SECRET"
+#   recv_window_ms: 5000
 
 # 風險與部位管理
 risk:

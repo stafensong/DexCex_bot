@@ -25,6 +25,11 @@ class MarketPair(BaseModel):
     dex_pool_fee: int
     base_precision: int = 8
     quote_precision: int = 8
+    # --- Optional fields for dynamically discovered pairs ---
+    base_address: Optional[str] = None
+    quote_address: Optional[str] = None
+    base_decimals: Optional[int] = None
+    quote_decimals: Optional[int] = None
 
 class Quote(BaseModel):
     pair: MarketPair
