@@ -39,7 +39,7 @@ class BinanceCexClient(CexClient):
         self._ws_listener_task: Optional[asyncio.Task] = None
         self._user_stream_task: Optional[asyncio.Task] = None
         self._listen_key_keepalive_task: Optional[asyncio.Task] = None
-        self.orderbooks: Dict[str, Dict[str, Decimal]] = {p.symbol.replace('/', ''): {'bids': {}, 'asks': {}} for p in self.pairs}
+        self.orderbooks: Dict[str, Dict[str, Decimal]] = {p.cex_symbol.replace('/', ''): {'bids': {}, 'asks': {}} for p in self.pairs}
         self.last_update_ids: Dict[str, int] = {}
         self._listen_key: Optional[str] = None
         self._closing = False
@@ -215,7 +215,7 @@ class BinanceCexClient(CexClient):
                 "source": "binance",
                 "data": {
                     "order_id": update.order_id,
-                    "symbol": pair.symbol if pair else event.get('s'),
+                    "symbol": pair.cex_symbol if pair else event.get('s'),
                     "side": event.get('S'),
                     "status": update.status,
                     "fill_size": float(update.filled_size),
@@ -230,7 +230,7 @@ class BinanceCexClient(CexClient):
             logger.error(f"推送成交資訊到 dashboard 失敗: {exc}")
 
     async def _ws_listener(self):
-        streams = [f"{p.symbol.replace('/', '').lower()}@depth" for p in self.pairs]
+        streams = [f"{p.cex_symbol.replace('/', '').lower()}@depth" for p in self.pairs]
         url = f"{self.ws_url}/{'/'.join(streams)}"
         
         while True:
@@ -257,7 +257,7 @@ class BinanceCexClient(CexClient):
             await self._sync_orderbook(pair)
 
     async def _sync_orderbook(self, pair: MarketPair):
-        symbol = pair.symbol.replace('/', '')
+        symbol = pair.cex_symbol.replace('/', '')
         logger.debug(f"正在為 {symbol} 同步訂單簿快照...")
         if not self._session:
             raise ConnectionError("Session not initialized.")
@@ -290,7 +290,7 @@ class BinanceCexClient(CexClient):
         # 根據 Binance 文件，如果 first_update_id > last_update_id + 1，需要重新同步
         if first_update_id > self.last_update_ids[symbol] + 1:
             logger.warning(f"{symbol} WebSocket 更新脫節，正在重新同步...")
-            await self._sync_orderbook(next(p for p in self.pairs if p.symbol.replace('/','') == symbol))
+            await self._sync_orderbook(next(p for p in self.pairs if p.cex_symbol.replace('/','') == symbol))
             return
 
         # 只有當 final_update_id > last_update_id 時才處理更新
@@ -315,7 +315,7 @@ class BinanceCexClient(CexClient):
         self.last_update_ids[symbol] = final_update_id
 
     async def get_quote(self, pair: MarketPair) -> Optional[Quote]:
-        symbol = pair.symbol.replace('/', '')
+        symbol = pair.cex_symbol.replace('/', '')
         book = self.orderbooks.get(symbol)
 
         if book and book['bids'] and book['asks']:
@@ -366,7 +366,7 @@ class BinanceCexClient(CexClient):
             raise ConnectionError("Session not initialized.")
 
         params = {
-            'symbol': order.pair.symbol.replace('/', ''),
+            'symbol': order.pair.cex_symbol.replace('/', ''),
             'side': order.side.upper(),
             'type': order.type.upper(),
             'quantity': f"{order.size:.{order.pair.base_precision}f}",

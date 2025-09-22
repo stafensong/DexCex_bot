@@ -134,32 +134,54 @@ def build_cex_to_dex_map(dex_pools: list) -> dict:
     for pool in dex_pools:
         if 'token0' not in pool or 'token1' not in pool:
             continue
-        token0_sym, token1_sym = pool['token0']['symbol'], pool['token1']['symbol']
+        
+        # --- Temporary Debugging for GNO ---
+        if 'GNO' in pool['token0']['symbol'].upper() or 'GNO' in pool['token1']['symbol'].upper():
+            logger.debug(f"Found GNO pool in build_cex_to_dex_map: {pool}")
+        # --- End Debugging ---
+
         alt_symbol = None
-        if token0_sym in TARGET_QUOTE_CURRENCIES:
-            alt_symbol = token1_sym
-        elif token1_sym in TARGET_QUOTE_CURRENCIES:
-            alt_symbol = token0_sym
-        elif 'WETH' in token0_sym.upper():
-            alt_symbol = token1_sym
-        elif 'WETH' in token1_sym.upper():
-            alt_symbol = token0_sym
+        is_token0_quote = _normalize_dex_symbol(pool['token0']['symbol']) in TARGET_QUOTE_CURRENCIES
+        is_token1_quote = _normalize_dex_symbol(pool['token1']['symbol']) in TARGET_QUOTE_CURRENCIES
+
+        # Only proceed if one of the tokens is a target quote currency
+        if is_token0_quote and not is_token1_quote:
+            alt_symbol = pool['token1']['symbol']
+            quote_sym = pool['token0']['symbol']
+        elif is_token1_quote and not is_token0_quote:
+            alt_symbol = pool['token0']['symbol']
+            quote_sym = pool['token1']['symbol']
+        else:
+            # This pool is not a direct pair with our target quote currencies (e.g., WETH/GNO), so we skip it for direct mapping.
+            # We could handle WETH pairs separately if needed, but for now, we focus on direct USDT/USDC pairs.
+            continue
+
         if alt_symbol:
             # Normalize alt_symbol for CEX comparison
-            normalized_alt_symbol = alt_symbol.upper() # Ensure uppercase
-            normalized_alt_symbol = normalized_alt_symbol.replace('WETH', 'ETH')
-            normalized_alt_symbol = normalized_alt_symbol.replace('WBTC', 'BTC')
-            normalized_alt_symbol = normalized_alt_symbol.replace('WRAPPED ', '') # e.g., "WRAPPED BTC" -> "BTC"
-            normalized_alt_symbol = normalized_alt_symbol.replace('TOKEN', '') # e.g., "ENS TOKEN" -> "ENS"
-            normalized_alt_symbol = normalized_alt_symbol.strip() # Remove any leading/trailing spaces
+            normalized_alt_symbol = _normalize_dex_symbol(alt_symbol)
 
-            for q_currency in TARGET_QUOTE_CURRENCIES:
-                cex_symbol_concat = f"{normalized_alt_symbol}{q_currency}"
-                if cex_symbol_concat not in mapping:
-                    mapping[cex_symbol_concat] = []
-                mapping[cex_symbol_concat].append(pool)
-    logger.info(f"Map built. Found mappings for {len(mapping)} unique CEX symbols.")
+            # Create the CEX symbol key (e.g., GNOUSDT)
+            cex_symbol_concat = f"{normalized_alt_symbol}{quote_sym}"
+            if cex_symbol_concat not in mapping:
+                mapping[cex_symbol_concat] = []
+            mapping[cex_symbol_concat].append(pool)
+    logger.info(f"Map建立成功. 找到 {len(mapping)} 單一的 CEX symbols.")
     return mapping
+
+def _normalize_dex_symbol(symbol: str) -> str:
+    normalized_symbol = symbol.upper()
+    # Handle stablecoin variants like "USDC.e"
+    if normalized_symbol.startswith("USDC"):
+        return "USDC"
+    if normalized_symbol.startswith("USDT"):
+        return "USDT"
+    
+    normalized_symbol = normalized_symbol.replace('WETH', 'ETH')
+    normalized_symbol = normalized_symbol.replace('WBTC', 'BTC')
+    normalized_symbol = normalized_symbol.replace('WRAPPED ', '')
+    normalized_symbol = normalized_symbol.replace('TOKEN', '')
+    normalized_symbol = normalized_symbol.strip()
+    return normalized_symbol
 
 class AutoDiscoveryEngine:
     def __init__(self, config: AppConfig):
@@ -178,7 +200,7 @@ class AutoDiscoveryEngine:
         with dataset_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
             self._dex_pools = data.get("pools", [])
-        logger.info(f"載入 {len(self._dex_pools)} DEX 池子 from {dataset_path}")
+        logger.info(f"Loaded {len(self._dex_pools)} DEX pools from {dataset_path}")
 
     async def run(self):
         logger.info("開始執行 AutoDiscovery 引擎...")
@@ -195,7 +217,7 @@ class AutoDiscoveryEngine:
             logger.info(f"異常的 CEX 交易對符號: {[s.symbol for s in spiked_symbols]}")
             opportunities = await self._evaluate_opportunities(spiked_symbols)
         self._save_opportunities(opportunities)
-        logger.info("AutoDiscovery Engine run finished.")
+        logger.info("AutoDiscovery 引擎結束執行.")
 
     async def _scan_cex_for_spikes(self) -> List[VolumeSpike]:
         if not self.cex_client:
@@ -242,10 +264,6 @@ class AutoDiscoveryEngine:
             return []
         logger.info(f"評估 {len(spikes)} CEX異常交易對的套利機會...")
 
-        # --- Debugging: Analyze Symbol Overlap ---
-        self._analyze_symbol_overlap(spikes)
-        # --- End Debugging ---
-
         opportunities: List[ArbitrageOpportunity] = []
         for spike in spikes:
             if spike.symbol not in self._cex_to_dex_map:
@@ -262,28 +280,34 @@ class AutoDiscoveryEngine:
             dex_candidates = self._cex_to_dex_map[spike.symbol]
             for dex_pool in dex_candidates:
                 try:
-                    # Dynamically build token details from the pool data
+                    # --- Correct Token Identification ---
+                    # Identify the quote token first, the other MUST be the base token.
                     token0 = dex_pool['token0']
                     token1 = dex_pool['token1']
                     
-                    base_token_details = token0 if token0['symbol'] == spike.base else token1
-                    quote_token_details = token1 if token0['symbol'] == spike.base else token0
+                    if _normalize_dex_symbol(token0['symbol']) in TARGET_QUOTE_CURRENCIES:
+                        quote_token_details = token0
+                        base_token_details = token1
+                    elif _normalize_dex_symbol(token1['symbol']) in TARGET_QUOTE_CURRENCIES:
+                        quote_token_details = token1
+                        base_token_details = token0
+                    else:
+                        logger.warning(f"Could not identify a quote token in pool {dex_pool['poolAddress']} for {spike.symbol}. Skipping.")
+                        continue
 
                     pair = MarketPair(
-                        base=spike.base, 
-                        quote=spike.quote, 
+                        base=_normalize_dex_symbol(base_token_details['symbol']), 
+                        quote=_normalize_dex_symbol(quote_token_details['symbol']), 
                         symbol=f"{spike.base}/{spike.quote}", 
                         dex_chain=dex_pool["chain"], 
                         dex_pool_fee=dex_pool["feeTier"],
-                        # Pass dynamic token info
                         base_address=base_token_details['address'],
                         quote_address=quote_token_details['address'],
-                        base_decimals=base_token_details.get('decimals', 18), # Default to 18 if not present
+                        base_decimals=base_token_details.get('decimals', 18),
                         quote_decimals=quote_token_details.get('decimals', 18)
                     )
                     probe_size = Decimal(str(self.scanner_config.arbitrage.probe_size_base))
                     
-                    # Assume we sell base for quote on DEX to compare with CEX price
                     quote = await self.dex_client.get_quote(pair, probe_size, side="sell")
                     if not quote or not quote.price > 0:
                         continue
@@ -307,32 +331,19 @@ class AutoDiscoveryEngine:
         return opportunities
 
     def _normalize_dex_symbol(self, symbol: str) -> str:
-        normalized_symbol = symbol.upper() # Ensure uppercase
+        normalized_symbol = symbol.upper()
+        # Handle stablecoin variants like "USDC.e"
+        if normalized_symbol.startswith("USDC"):
+            return "USDC"
+        if normalized_symbol.startswith("USDT"):
+            return "USDT"
+        
         normalized_symbol = normalized_symbol.replace('WETH', 'ETH')
         normalized_symbol = normalized_symbol.replace('WBTC', 'BTC')
-        normalized_symbol = normalized_symbol.replace('WRAPPED ', '') # e.g., "WRAPPED BTC" -> "BTC"
-        normalized_symbol = normalized_symbol.replace('TOKEN', '') # e.g., "ENS TOKEN" -> "ENS"
-        normalized_symbol = normalized_symbol.strip() # Remove any leading/trailing spaces
+        normalized_symbol = normalized_symbol.replace('WRAPPED ', '')
+        normalized_symbol = normalized_symbol.replace('TOKEN', '')
+        normalized_symbol = normalized_symbol.strip()
         return normalized_symbol
-
-    def _analyze_symbol_overlap(self, spikes: List[VolumeSpike]):
-        spiked_base_symbols = {spike.base for spike in spikes}
-        logger.info(f"異常的 CEX 交易對 base symbols: {spiked_base_symbols}")
-
-        dex_pool_base_symbols = set()
-        for pool in self._dex_pools:
-            if 'token0' in pool and 'symbol' in pool['token0']:
-                dex_pool_base_symbols.add(self._normalize_dex_symbol(pool['token0']['symbol']))
-            if 'token1' in pool and 'symbol' in pool['token1']:
-                dex_pool_base_symbols.add(self._normalize_dex_symbol(pool['token1']['symbol']))
-        
-        logger.info(f"正規化 DEX 池子 token symbols (sample): {list(dex_pool_base_symbols)[:10]}")
-
-        overlap = spiked_base_symbols.intersection(dex_pool_base_symbols)
-        if overlap:
-            logger.success(f"找到重疊的交易量異常CEX base symbols 與 DEX pool tokens: {overlap}")
-        else:
-            logger.warning("找不到重疊的交易量異常CEX base symbols 與 DEX pool tokens.")
 
     def _save_opportunities(self, opportunities: List[ArbitrageOpportunity]):
         output_path = Path(self.scanner_config.persist_path)
@@ -344,13 +355,17 @@ class AutoDiscoveryEngine:
         }
         with output_path.open("w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2)
-        logger.info(f"Saved {len(opportunities)} opportunities to {output_path}")
+        logger.info(f"儲存 {len(opportunities)} 套利機會到 {output_path}")
+
 
 async def main():
     """Main execution block for running the engine standalone."""
     import logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
+    import sys
+    # Add a sink for stdout to show loguru logs
+    logger.remove()
+    logger.add(sys.stdout, level="INFO")
+
     config_path = Path('config/default.yaml')
     if not config_path.exists():
         logger.error(f"Configuration file not found at {config_path}. Please ensure it exists.")
@@ -360,6 +375,7 @@ async def main():
         config = load_config(config_path)
         engine = AutoDiscoveryEngine(config)
         await engine.run()
+
     except Exception as e:
         logger.error(f"An error occurred during engine execution: {e}", exc_info=True)
 

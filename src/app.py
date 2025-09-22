@@ -1,6 +1,8 @@
 import asyncio
+import json
 import uvloop
 from typing import List
+from pathlib import Path
 
 from .core.config import load_config, AppConfig
 from .core.types import MarketPair
@@ -26,16 +28,39 @@ class ArbiBotApp:
         self.mode = mode
         self.dashboard_publisher = None
 
-        # 初始化核心組件
-        pairs = [MarketPair(
+        # 1. Load static pairs from config
+        static_pairs = [MarketPair(
             base=p.base,
             quote=p.quote,
-            symbol=p.cex_symbol,
+            cex_symbol=p.cex_symbol,
             dex_chain=p.dex_chain,
             dex_pool_fee=p.dex_pool_fee,
             base_precision=p.base_precision if p.base_precision is not None else 8,
             quote_precision=p.quote_precision if p.quote_precision is not None else 8,
+            # Copy strategy params from static config
+            min_edge_bps=p.min_edge_bps,
+            max_slippage_bps=p.max_slippage_bps,
+            max_size_quote=p.max_size_quote,
+            price_floor_quote=p.price_floor_quote,
+            price_ceiling_quote=p.price_ceiling_quote,
+            max_edge_bps=p.max_edge_bps,
+            edge_safety_multiplier=p.edge_safety_multiplier,
         ) for p in config.pairs]
+        
+        # 2. Load dynamic pairs from auto-discovery JSON
+        dynamic_pairs = self._load_discovered_pairs(config)
+
+        # 3. Combine and de-duplicate pairs
+        final_pairs = {p.cex_symbol: p for p in static_pairs}
+        for p in dynamic_pairs:
+            if p.cex_symbol not in final_pairs:
+                final_pairs[p.cex_symbol] = p
+        
+        pairs = list(final_pairs.values())
+        self.logger.info(f"監控交易對總數: {len(pairs)}. (Static: {len(static_pairs)}, Dynamic: {len(dynamic_pairs)})")
+        if not pairs:
+            self.logger.warning("沒有設定任何交易對，機器人將不會執行任何交易。")
+
         if config.dashboard.enabled:
             self.dashboard_publisher = DashboardPublisher(
                 config.dashboard.redis_url,
@@ -44,15 +69,64 @@ class ArbiBotApp:
         self.cex_client = BinanceCexClient(config.cex, config.secrets, pairs, dashboard_publisher=self.dashboard_publisher)
         self.dex_client = UniV3DexClient(config.dex, config.network, config.secrets, config.tokens)
         self.risk_manager = RiskManager(config.risk)
-        self.detector = OpportunityDetector(self.cex_client, self.dex_client, config.pairs)
+        self.detector = OpportunityDetector(self.cex_client, self.dex_client, pairs)
         self.router = SimpleRouter()
         
         # 根據模式選擇執行器
         if self.mode == 'paper':
-            self.executor = PaperExecutor(config.pairs)
+            self.executor = PaperExecutor(pairs)
         else:
-            self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager, config.pairs)
+            self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager, pairs)
         self.logger.info(f"應用程式已在 {self.mode.upper()} 模式下初始化。")
+
+    def _load_discovered_pairs(self, config: AppConfig) -> List[MarketPair]:
+        """從 auto_discovery.json 檔案載入動態發現的交易對。"""
+        if not config.scanner.auto_discovery:
+            return []
+            
+        discovery_path = Path(config.scanner.auto_discovery.persist_path)
+        if not discovery_path.exists():
+            self.logger.info("未找到 auto_discovery.json，跳過載入動態交易對。")
+            return []
+
+        try:
+            with discovery_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            discovered_pairs = []
+            opportunities = data.get("opportunities", [])
+            self.logger.info(f"從 {discovery_path} 載入 {len(opportunities)} 個動態機會。")
+
+            for opp in opportunities:
+                if not opp.get("dex_candidates"):
+                    continue
+                
+                # For simplicity, we take the first valid DEX candidate
+                candidate = opp["dex_candidates"][0]
+                
+                # Load default strategy params from config for dynamic pairs
+                default_params = config.scanner.volume.default_pair_params
+                pair = MarketPair(
+                    base=opp["base"],
+                    quote=opp["quote"],
+                    cex_symbol=opp["symbol"],
+                    dex_chain=candidate["chain"],
+                    dex_pool_fee=candidate["fee"],
+                    base_precision=8, 
+                    quote_precision=8,
+                    min_edge_bps=default_params.get("min_edge_bps"),
+                    max_slippage_bps=default_params.get("max_slippage_bps"),
+                    max_size_quote=default_params.get("max_size_quote"),
+                    price_floor_quote=default_params.get("price_floor_quote"),
+                    price_ceiling_quote=default_params.get("price_ceiling_quote"),
+                    max_edge_bps=default_params.get("max_edge_bps"),
+                    edge_safety_multiplier=default_params.get("edge_safety_multiplier"),
+                )
+                discovered_pairs.append(pair)
+            return discovered_pairs
+        except Exception as e:
+            self.logger.error(f"讀取或解析 {discovery_path} 時發生錯誤: {e}", exc_info=True)
+            return []
 
     async def start(self):
         self.logger.info("機器人啟動中...")
@@ -90,7 +164,7 @@ class ArbiBotApp:
                     self.logger.debug(f"生成執行計畫: {plan}")
 
                     if not self.risk_manager.is_trade_allowed(plan):
-                        self.logger.warning(f"交易被風險管理員阻止: {plan.pair.symbol}")
+                        self.logger.warning(f"交易被風險管理員阻止: {plan.pair.cex_symbol}")
                         continue
 
                     exec_summary = await self.executor.run(plan)

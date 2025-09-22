@@ -130,8 +130,17 @@ DEX_WALLET_PRIVATE_KEY="0x..."
 本專案提供一個功能豐富的命令列介面 (CLI)。
 
 ### 紙上交易 (Paper Trading)
+首先透過以下指令來使用我們建立的新功能：
+```bash  
+python -m src.cli.main autodiscover
+```
 
-連接真實行情數據進行模擬，驗證數據準確性，但**不執行**任何真實交易。這是上線前最重要的驗證步驟。
+  執行此指令將會：
+   1. 啟動 AutoDiscoveryEngine。
+   2. 掃描 CEX 和 DEX。
+   3. 將發現的機會儲存到 data/auto_discovery.json。
+
+接著，連接真實行情數據進行模擬，驗證數據準確性，但**不執行**任何真實交易。這是上線前最重要的驗證步驟。
 ```bash
 python -m src.cli.main paper
 ```

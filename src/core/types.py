@@ -20,7 +20,7 @@ __all__ = [
 class MarketPair(BaseModel):
     base: str
     quote: str
-    symbol: str  # e.g., "ETH/USDT"
+    cex_symbol: str  # e.g., "ETHUSDT"
     dex_chain: str
     dex_pool_fee: int
     base_precision: int = 8
@@ -30,6 +30,14 @@ class MarketPair(BaseModel):
     quote_address: Optional[str] = None
     base_decimals: Optional[int] = None
     quote_decimals: Optional[int] = None
+    # --- Optional fields for strategy parameters ---
+    min_edge_bps: Optional[int] = None
+    max_slippage_bps: Optional[int] = None
+    max_size_quote: Optional[int] = None
+    price_floor_quote: Optional[Decimal] = None
+    price_ceiling_quote: Optional[Decimal] = None
+    max_edge_bps: Optional[int] = None
+    edge_safety_multiplier: Optional[Decimal] = None
 
 class Quote(BaseModel):
     pair: MarketPair

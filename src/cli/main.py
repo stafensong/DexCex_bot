@@ -12,8 +12,29 @@ from backtest.simulator import Simulator
 from src.strategy.rebalancer import Rebalancer
 from src.exchange.binance import BinanceCexClient
 from src.scanner import VolumeScannerService, VolumeSpikeScanner, SpikeArbitrageEvaluator
+from src.scanner.autodiscovery import AutoDiscoveryEngine
 
 app = typer.Typer()
+
+@app.command()
+def autodiscover():
+    """
+    執行新的 AutoDiscovery 引擎，掃描 CEX 交易量異常並尋找對應的 DEX 池。
+    """
+    typer.echo("正在啟動 AutoDiscovery 引擎...")
+    uvloop.install()
+    config = load_config()
+    
+    async def main():
+        engine = AutoDiscoveryEngine(config)
+        await engine.run()
+
+    try:
+        asyncio.run(main())
+        typer.secho(f"AutoDiscovery 引擎執行完畢。結果已儲存至 {config.scanner.auto_discovery.persist_path}", fg=typer.colors.GREEN)
+    except Exception as e:
+        typer.secho(f"AutoDiscovery 引擎執行時發生錯誤: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from e
 
 @app.command()
 def run():
