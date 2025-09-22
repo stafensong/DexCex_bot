@@ -21,8 +21,9 @@
     - **實盤交易 (Live Trading)**: 執行真實交易。
 - **狀態持久化**: 可將倉位、PnL 等狀態保存至檔案，在機器人重啟後能恢復先前狀態，實現不間斷管理。
 - **資產再平衡**: 提供獨立的再平衡指令，可根據設定的目標比例，自動在 CEX 調整資產庫存。
-- **動態交易對發現**: 內建 Volume Scanner，能自動偵測 CEX 1 小時交易量異常的交易對、驗證 Uniswap V3 Pool 並將結果寫入 `data/discovered_pairs.yaml`，下次啟動時即自動納入監控。
-- **Volume Spike 監控**: 每 30 分鐘掃描 Binance 所有 USDT 現貨交易對，鎖定成交量激增的標的並立即比對 DEX 價格，輸出可套利訊號。
+- **自動機會發現 (AutoDiscovery Engine)**: 內建全新的自動發現引擎，取代了舊有的掃描器。它透過一個兩階段流程來發現套利機會：
+    1. **DEX 數據集建立**: 執行一次性的 `dex_pool_scanner.py` 腳本，從多個鏈的 Uniswap Subgraph 中獲取數千個流動性池的數據，並過濾出符合 TVL 和交易量標準的潛力池，儲存為 `data/target_pools_Dex.json`。
+    2. **CEX-DEX 匹配與評估**: `autodiscover` 指令會掃描幣安上交易量異常飆升的交易對，然後利用第一步建立的數據集，快速匹配出這些交易對在 DEX 上的對應流動性池，獲取即時價格，並將最終的套利機會寫入 `data/auto_discovery.json`。
 - **可觀測性**: 透過 Prometheus 導出詳細的性能指標 (延遲、PnL、錯誤計數等)，並以 JSON 格式記錄結構化日誌，便於監控與告警。
 
 ## 系統架構
@@ -30,10 +31,11 @@
 專案採用了清晰的模組化分層架構，實現了邏輯與基礎設施的分離。
 
 - **`config/`**: 存放所有使用者可配置的 YAML 檔案。
-- **`data/`**: 用於存放數據檔案，如回測數據集 (`.csv`) 和機器人狀態 (`state.json`)。
+- **`data/`**: 用於存放數據檔案，如回測數據集 (`.csv`)、機器人狀態 (`state.json`) 和自動發現的機會 (`auto_discovery.json`)。
 - **`src/core/`**: 定義了專案的核心數據結構 (`types.py`) 和設定模型 (`config.py`)。
 - **`src/infra/`**: 基礎設施層，負責日誌、指標、儲存和外部通訊 (HTTP/WS)。
 - **`src/exchange/`**: 交易所客戶端實現，分為 `cex_base.py` 和 `dex_base.py` 協議，以及 `binance.py` 和 `univ3.py` 的具體實現。
+- **`src/scanner/`**: 包含新的 `autodiscovery.py` 引擎和 `dex_pool_scanner.py` 腳本。
 - **`src/strategy/`**: 策略層，是機器人的「大腦」，包含機會偵測 (`detector.py`)、路由 (`router.py`)、執行 (`executor.py`) 和再平衡 (`rebalancer.py`)。
 - **`src/risk/`**: 風險管理模組，負責交易前的檢查和交易後的状态更新。
 - **`src/cli/`**: 命令列介面 (`main.py`)，是整個應用程式的入口。
@@ -41,12 +43,18 @@
 
 ### 數據流
 
-1.  **行情輸入**: `BinanceCexClient` 透過 WebSocket 維護訂單簿；`UniV3DexClient` 透過 RPC 查詢鏈上報價。
-2.  **機會偵測**: `OpportunityDetector` 不斷比對 CEX 和 DEX 的價格。
-3.  **產生機會**: 當價差超過 `min_edge_bps` 時，創建一個 `Opportunity` 物件。
-4.  **執行交易**: `TransactionExecutor` 接收 `Opportunity`，產生標準化的 CEX/DEX legs 並即時計算 PnL 與 sanity check。
-5.  **狀態更新**: `ExecutionSummary` 被發送到 `RiskManager`，後者更新倉位和 PnL，並透過 `storage.py` 將狀態持久化。
-6.  **成交回補**: `BinanceCexClient` 訂閱 User Data Stream，取得即時 `executionReport` 成交事件，並將資訊推送至 Redis/dashboard，供真實損益與監控使用。
+1.  **機會發現 (手動觸發)**:
+    - **`python src/scanner/dex_pool_scanner.py`**: 執行此腳本以更新本地的 DEX 流動性池數據集。
+    - **`python -m src.cli.main autodiscover`**: 執行此指令，掃描 CEX 交易量，與本地 DEX 數據集進行匹配，並將發現的機會寫入 `data/auto_discovery.json`。
+2.  **啟動監控 (主程式)**:
+    - **`python -m src.cli.main paper`**: 啟動機器人。
+    - `ArbiBotApp` 在初始化時，會自動載入 `config/pairs.yaml` 中的靜態交易對和 `data/auto_discovery.json` 中的動態交易對。
+3.  **行情輸入**: `BinanceCexClient` 透過 WebSocket 維護訂單簿；`UniV3DexClient` 透過 RPC 查詢鏈上報價。
+4.  **機會偵測**: `OpportunityDetector` 不斷比對 CEX 和 DEX 的價格。
+5.  **產生機會**: 當價差超過 `min_edge_bps` 時，創建一個 `Opportunity` 物件。
+6.  **執行交易**: `TransactionExecutor` 接收 `Opportunity`，產生標準化的 CEX/DEX legs 並即時計算 PnL 與 sanity check。
+7.  **狀態更新**: `ExecutionSummary` 被發送到 `RiskManager`，後者更新倉位和 PnL，並透過 `storage.py` 將狀態持久化。
+8.  **成交回補**: `BinanceCexClient` 訂閱 User Data Stream，取得即時 `executionReport` 成交事件，並將資訊推送至 Redis/dashboard，供真實損益與監控使用。
 
 #### 交易腿與損益計算
 
@@ -105,13 +113,12 @@ DEX_WALLET_PRIVATE_KEY="0x..."
 #### 第二步：通用與交易對設定 (config/default.yaml, config/pairs.yaml, config/scanner.yaml)
 
 - **`config/default.yaml`**: 設定全局參數，如風險限制、CEX mainnet/testnet、再平衡策略、DEX 的通用合約地址 (Router/Quoter/Factory) 等。
-- **`config/pairs.yaml`**: 設定您想要監控的交易對。每個交易對都需要指定 `base` (基礎貨幣), `quote` (報價貨幣), `dex_chain` (該交易對應的 DEX 所在鏈) 等。
-- **`config/scanner.yaml`**: 管理 Volume Scanner 的觸發條件（如最小 1 小時交易量、異常倍率）以及動態交易對的預設參數與儲存位置。
-  > **注意**：Volume Scanner 仍需在 `config/tokens.yaml` 中事先定義欲查詢代幣於各鏈的合約地址與小數位。若掃描時出現「tokens.yaml 缺少 XXX/鏈 的地址設定」，請先補齊代幣資訊後再重跑。
+- **`config/pairs.yaml`**: 設定您想要**靜態**監控的核心交易對。
+- **`config/scanner.yaml`**: 管理 `AutoDiscoveryEngine` 的所有參數，例如 CEX 掃描的條件（回溯時長、交易量倍率）、候選池數量、以及動態交易對的預設策略參數。
 
 #### 第三步：新增鏈或代幣 (config/tokens.yaml)
 
-所有代幣在不同鏈上的地址都在此檔案中統一管理。
+所有代幣在不同鏈上的地址都在此檔案中統一管理。**注意：`AutoDiscoveryEngine` 不需要此檔案**，但對於 `pairs.yaml` 中靜態定義的交易對，以及 `rebalance`、`check-dex-balance` 等輔助指令，此檔案仍然是必需的。
 
 - **若要新增一個代幣 (例如 MATIC on Polygon)**:
   在 `tokens.yaml` 中新增一個 `MATIC` 區塊，並提供它在 `polygon` 鏈上的地址和精度。
@@ -129,108 +136,57 @@ DEX_WALLET_PRIVATE_KEY="0x..."
 
 本專案提供一個功能豐富的命令列介面 (CLI)。
 
-### 紙上交易 (Paper Trading)
-首先透過以下指令來使用我們建立的新功能：
-```bash  
+### 工作流程：從發現到監控
+
+新的標準工作流程分為兩步：
+
+#### 第一步：執行自動機會發現
+
+首先，執行 `autodiscover` 指令來掃描市場並更新機會列表。您可以根據市場變化，定期（例如每小時）執行此指令。
+
+```bash
 python -m src.cli.main autodiscover
 ```
+此指令會執行 `AutoDiscoveryEngine`，掃描 CEX 交易量，匹配 DEX 池，並將發現的潛在機會覆寫到 `data/auto_discovery.json`。
 
-  執行此指令將會：
-   1. 啟動 AutoDiscoveryEngine。
-   2. 掃描 CEX 和 DEX。
-   3. 將發現的機會儲存到 data/auto_discovery.json。
+#### 第二步：啟動機器人進行監控
 
-接著，連接真實行情數據進行模擬，驗證數據準確性，但**不執行**任何真實交易。這是上線前最重要的驗證步驟。
+執行 `paper`（紙上交易）或 `run`（實盤交易）指令來啟動機器人。機器人現在會自動載入 `pairs.yaml` 和 `data/auto_discovery.json` 中的所有交易對進行監控。
+
 ```bash
 python -m src.cli.main paper
 ```
 
-1. 查詢 DEX 錢包餘額：
+如果機器人長時間沒有打印 `[PAPER MODE]` 的機會日誌，這可能意味著：
+   * 當前市場上沒有符合您 `min_edge_bps` 設定的套利機會。您可以嘗試將靜態交易對的 `min_edge_bps` 設定為一個非常小的值（例如 0 或 1），以便在測試階段更容易偵測到機會。
+
+### 輔助指令
+
+#### 更新 DEX 數據集
+
+在初次運行或您想更新 DEX 流動性池數據時，請手動執行 `dex_pool_scanner.py` 腳本。
+
 ```bash
-  python -m src.cli.main check-dex-balance
+python src/scanner/dex_pool_scanner.py
 ```
 
-2. 檢查 CEX 資產並模擬再平衡（無實際交易）：
+#### 查詢 DEX 錢包餘額
 ```bash
- python -m src.cli.main rebalance --paper-run
+python -m src.cli.main check-dex-balance
 ```
 
-執行後預測日誌：顯示再平衡機器人的模擬計畫，它告訴您如果真的執行再平衡會發生什麼事，但並沒有實際執行。
-   1. 資產: WETH, 當前比例: 100.00%,目標比例: 50.00%
-       * 解釋：機器人檢查了您在 CEX (中心化交易所) 上的資產。在它監控的資產對 (WETH 和 USDT) 中，它發現您資產的總價值
-         100% 都集中在 WETH 上，而您的目標是讓 WETH 和 USDT 的價值各佔 50%。這意味著您 CEX 帳戶中的 USDT
-         餘額可能趨近於零。
-
-   2. 資產比例偏離過大，觸發再平衡！
-       * 解釋：因為 100% 的現況和 50% 的目標差距太大，超過了您設定的觸發門檻，所以機器人決定需要進行一次「再平衡」。
-
-   3. 計畫在 CEX 以市價單 sell 0.110465 WETH
-       * 解釋：這是機器人計算出來的行動計畫。為了讓資產比例回到 50/50，它需要賣掉一部分的 WETH 來換成
-         USDT。它算出來需要賣掉的數量是 0.110465 WETH。
-如果機器人長時間沒有打印 [PAPER MODE] 的機會日誌，這可能意味著：
-   * 當前市場上沒有符合您 config/pairs.yaml 中 min_edge_bps 設定的套利機會。您可以嘗試將 min_edge_bps
-     設定為一個非常小的值（例如 0 或 1），以便在測試階段更容易偵測到機會。
-
-### 自動發現交易對 (Volume Scanner)
-
-自動從 CEX 偵測 1 小時交易量異常的交易對，並確認 Uniswap V3 是否存在對應池子。符合條件者會寫入
-`data/discovered_pairs.yaml`，並在下次啟動時自動加入監控名單。您可以使用底下指令手動觸發：
+#### 檢查 CEX 資產並模擬再平衡
 ```bash
-python -m src.cli.main discover_pairs  # 或使用 discover-pairs
+python -m src.cli.main rebalance --paper-run
 ```
 
-Volume Scanner 的參數位於 `config/scanner.yaml`，可依需求調整引用的報價資產、異常倍率、最小成交量、偏好的鏈別與池子費率階層，以及寫入預設的交易對風險參數。
-
+#### 手動驗證池子是否存在
 若需要手動驗證池子是否存在，可使用 CLI 指令查詢：
 ```bash
 python -m src.cli.main lookup_pool REZ USDC --chain ethereum --fee 10000 \
   --base-address 0x... --base-decimals 18
 ```
 未在 `tokens.yaml` 設定的代幣可以透過 `--base-address`／`--quote-address` 臨時指定地址與小數位，快速確認 Uniswap Factory 的回應。
-
-### Volume Spike 監控與套利評估
-
-此模組會每次執行時：
-
-1. 透過 `get_klines()` 抓取所有 USDT 現貨交易對最近兩小時的成交量。
-2. 若「當前小時成交量 > 前一小時 × 1.5」，視為 spike；依變化倍數排序並寫入 `data/volume_spikes.json`（僅保留前 10 名）。
-3. 針對 JSON 中的 symbol 取得 Binance 最新價格與 Uniswap V3 報價，計算扣除手續費與 gas buffer 後的價差，超過 `config/scanner.yaml` → `spike.arbitrage.edge_threshold_bps` 即輸出套利訊號。
-
-執行指令：
-```bash
-python -m src.cli.main spike_run
-```
-- `--no-evaluate`：僅更新 JSON，不計算價差。
-- `--use-existing`：跳過 Binance 掃描，直接使用現有 JSON 評估（適用於短時間重複檢查）。
-
-排程建議（例如每 30 分鐘一次）：
-```cron
-*/30 * * * * /bin/bash -lc 'cd /Users/<user>/DexCex_bot && source venv/bin/activate && python -m src.cli.main spike_run'
-```
-
-Volume Spike 模組的參數（掃描頻率、倍率門檻、檔案路徑、套利閾值等）皆在 `config/scanner.yaml` 中可自訂。
-
-#### 排程自動更新 CEX 交易量清單
-
-建議每小時或自訂週期執行一次 Volume Scanner，以便自動補齊新的潛在交易對。以下提供常見排程方式：
-
-1. **crontab (Linux/macOS)**：
-   ```bash
-   crontab -e
-   ```
-   加入類似條目（以每小時執行為例）：
-   ```cron
-   0 * * * * /bin/bash -lc 'cd /Users/<你的使用者名稱>/DexCex_bot && source venv/bin/activate && python -m src.cli.main discover_pairs'
-   ```
-   - 請把路徑替換成實際的專案位置與虛擬環境。
-   - 若使用 `venv_uniswap_swapper`，請將 `source` 指向對應的虛擬環境。
-
-2. **systemd (Linux 伺服器)**：建立 `discover-pairs.service` 與 `discover-pairs.timer`，指定執行指令 `python -m src.cli.main discover_pairs`，並啟用 `systemctl enable --now discover-pairs.timer`。
-
-3. **macOS launchd**：建立 `~/Library/LaunchAgents/com.arbibot.discoverpairs.plist`，在 `ProgramArguments` 中填入虛擬環境 Python 路徑與 `-m src.cli.main discover_pairs`，設定 `StartInterval` 3600 以每小時執行一次，最後用 `launchctl load` 載入。
-
-排程完成後，可檢查 `data/discovered_pairs.yaml` 是否有新的交易對紀錄，並透過日誌確認執行情況。
-```
 
 ### 回測 (Backtesting)
 
