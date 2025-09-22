@@ -155,18 +155,18 @@ class TransactionExecutor:
     async def run(self, opp: Opportunity) -> ExecutionSummary:
         """根據輸入的 `Opportunity` 計算 legs、PnL 與 edge。"""
         start_ts = time.time()
-        thresholds = self._thresholds.get(opp.pair.symbol, DEFAULT_SANITY_THRESHOLDS)
+        thresholds = self._thresholds.get(opp.pair.cex_symbol, DEFAULT_SANITY_THRESHOLDS)
 
         legs, pnl_quote, edge_bps, error = evaluate_opportunity(opp, thresholds)
         if error:
             logger.warning(
                 "機會未通過 sanity check: pair=%s direction=%s reason=%s",
-                opp.pair.symbol,
+                opp.pair.cex_symbol,
                 opp.direction,
                 error,
             )
             metrics.trades_executed.labels(
-                pair=opp.pair.symbol,
+                pair=opp.pair.cex_symbol,
                 direction=opp.direction,
                 status="invalid",
             ).inc()
@@ -186,11 +186,11 @@ class TransactionExecutor:
         )
 
         metrics.trades_executed.labels(
-            pair=opp.pair.symbol,
+            pair=opp.pair.cex_symbol,
             direction=opp.direction,
             status="success",
         ).inc()
-        metrics.pnl_quote.labels(pair=opp.pair.symbol).inc(float(pnl_quote))
+        metrics.pnl_quote.labels(pair=opp.pair.cex_symbol).inc(float(pnl_quote))
         return summary
 
     def _build_invalid_summary(self, opp: Opportunity, start_ts: float) -> ExecutionSummary:
@@ -220,13 +220,13 @@ class PaperExecutor:
 
     async def run(self, opp: Opportunity) -> ExecutionSummary:
         start_ts = time.time()
-        thresholds = self._thresholds.get(opp.pair.symbol, DEFAULT_SANITY_THRESHOLDS)
+        thresholds = self._thresholds.get(opp.pair.cex_symbol, DEFAULT_SANITY_THRESHOLDS)
 
         legs, pnl_quote, edge_bps, error = evaluate_opportunity(opp, thresholds)
         if error:
             logger.warning(
                 "[PAPER MODE] 機會被拒絕: pair=%s direction=%s reason=%s",
-                opp.pair.symbol,
+                opp.pair.cex_symbol,
                 opp.direction,
                 error,
             )
@@ -246,7 +246,7 @@ class PaperExecutor:
         logger.info(
             "[PAPER MODE] 偵測到機會: {} {} | CEX={:.4f} | DEX={:.4f} | PnL={:.4f}",
             opp.direction,
-            opp.pair.symbol,
+            opp.pair.cex_symbol,
             float(opp.cex_price),
             float(opp.dex_price),
             float(pnl_quote),

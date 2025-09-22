@@ -201,7 +201,7 @@ class UniV3DexClient(DexClient):
 
             # 合理性過濾
             if not (Decimal("1e-18") < price_q_per_b < Decimal("1e18")):
-                 logger.debug(f"丟棄不合理 DEX 價: {price_q_per_b} ({pair.symbol} on {pair.dex_chain}, side={side})")
+                 logger.debug(f"丟棄不合理 DEX 價: {price_q_per_b} ({pair.cex_symbol} on {pair.dex_chain}, side={side})")
                  return None
 
             return Quote(
@@ -214,7 +214,7 @@ class UniV3DexClient(DexClient):
             )
 
         except Exception as e:
-            logger.warning(f"獲取 DEX 報價失敗 ({pair.symbol} on {pair.dex_chain}): {e}")
+            logger.warning(f"獲取 DEX 報價失敗 ({pair.cex_symbol} on {pair.dex_chain}): {e}")
             return None
 
     async def _approve_token(self, w3: Web3, token_address: str, router_address: str, required_amount: int):

@@ -165,6 +165,7 @@ python -m src.cli.main paper
 #### 更新 DEX 數據集
 
 在初次運行或您想更新 DEX 流動性池數據時，請手動執行 `dex_pool_scanner.py` 腳本。
+目的是直接去 Subgraph，把所有存在的、有流動性的池子的完整清單（地圖）拿回來。
 
 ```bash
 python src/scanner/dex_pool_scanner.py
@@ -210,7 +211,11 @@ python -m src.cli.main rebalance
 python -m src.cli.main run
 ```
 
-## 其他文件
+## 其他文件/資訊
 
 - **安全指南**: [SECURITY.md](SECURITY.md)
 - **維運指南**: [OPERATIONS.md](OPERATIONS.md)
+- **請求速率**: 在 src/app.py 的 main_loop 中有寫明， await asyncio.sleep(0.05) # 50ms, 避免空轉。
+               在這個頻率之下，3 (個交易對) × 2 (個請求/交易對) × 20 (次循環/秒) = 120 RPS (每秒請求數)
+               Quicknode費率：$212/month (yearly billed) for 125 RPS
+               預算關係目前將sleep時間延長到0.2秒，即30 RPS。

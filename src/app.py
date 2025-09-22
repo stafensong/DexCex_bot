@@ -103,7 +103,23 @@ class ArbiBotApp:
                 
                 # For simplicity, we take the first valid DEX candidate
                 candidate = opp["dex_candidates"][0]
+                raw_pool = candidate.get("raw_pool_data")
+
+                if not raw_pool:
+                    self.logger.warning(f"Skipping opportunity {opp['symbol']} because raw_pool_data is missing.")
+                    continue
+
+                # --- Dynamically identify token details from raw_pool_data ---
+                token0 = raw_pool['token0']
+                token1 = raw_pool['token1']
+
+                # We need to normalize symbols to correctly identify base/quote
+                # This logic should be kept consistent with autodiscovery.py
+                token0_norm_sym = token0['symbol'].upper().replace('WETH', 'ETH')
+                token1_norm_sym = token1['symbol'].upper().replace('WETH', 'ETH')
                 
+                base_details, quote_details = (token0, token1) if token0_norm_sym == opp["base"] else (token1, token0)
+
                 # Load default strategy params from config for dynamic pairs
                 default_params = config.scanner.volume.default_pair_params
                 pair = MarketPair(
@@ -112,6 +128,10 @@ class ArbiBotApp:
                     cex_symbol=opp["symbol"],
                     dex_chain=candidate["chain"],
                     dex_pool_fee=candidate["fee"],
+                    base_address=base_details['address'],
+                    quote_address=quote_details['address'],
+                    base_decimals=base_details.get('decimals', 18),
+                    quote_decimals=quote_details.get('decimals', 18),
                     base_precision=8, 
                     quote_precision=8,
                     min_edge_bps=default_params.get("min_edge_bps"),
@@ -154,7 +174,7 @@ class ArbiBotApp:
             try:
                 opportunities = await self.detector.detect()
                 if not opportunities:
-                    await asyncio.sleep(0.05) # 50ms, 避免空轉
+                    await asyncio.sleep(0.2) # 0.1=100ms, 避免空轉
                     continue
 
                 for opp in opportunities:

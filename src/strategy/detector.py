@@ -85,7 +85,7 @@ class OpportunityDetector:
                 dex_price=dex_sell_price, edge_bps=edge_bps_1, pair_config=pair_config,
                 size=trade_size, slippage_bps=slippage_bps
             )
-            metrics.opportunities_found.labels(pair=pair.symbol, direction="CEX_to_DEX").inc()
+            metrics.opportunities_found.labels(pair=pair.cex_symbol, direction="CEX_to_DEX").inc()
             return opp
 
         # 方向 2: 在 DEX 買, 在 CEX 賣 (DEX_to_CEX)
@@ -97,7 +97,7 @@ class OpportunityDetector:
                 dex_price=dex_buy_price, edge_bps=edge_bps_2, pair_config=pair_config,
                 size=trade_size, slippage_bps=slippage_bps
             )
-            metrics.opportunities_found.labels(pair=pair.symbol, direction="DEX_to_CEX").inc()
+            metrics.opportunities_found.labels(pair=pair.cex_symbol, direction="DEX_to_CEX").inc()
             return opp
 
         return None
@@ -136,8 +136,8 @@ class OpportunityDetector:
             size=size,
             cex_price=cex_price,
             dex_price=dex_price,
-            dex_chain=pair_config.dex_chain,
-            dex_pool_fee=pair_config.dex_pool_fee,
+            dex_chain=pair.dex_chain,
+            dex_pool_fee=pair.dex_pool_fee,
             edge_bps=edge_bps,
             slippage_bps=slippage_bps,
             gas_cost_quote=gas_cost,

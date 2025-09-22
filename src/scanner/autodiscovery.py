@@ -51,6 +51,7 @@ class DexCandidate:
     fee: int
     pool_address: str
     dex_price: float = 0.0
+    raw_pool_data: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ArbitrageOpportunity:
@@ -75,6 +76,7 @@ class ArbitrageOpportunity:
                     "fee": cand.fee,
                     "pool": cand.pool_address,
                     "dex_price": cand.dex_price,
+                    "raw_pool_data": cand.raw_pool_data,
                 }
                 for cand in self.dex_candidates
             ],
@@ -128,44 +130,66 @@ class BinancePublicClient:
 # --- Core Logic ---
 
 def build_cex_to_dex_map(dex_pools: list) -> dict:
-    """Builds a map from CEX symbols to a list of corresponding DEX pools."""
+    """
+    Builds a map from CEX symbols to a list of corresponding DEX pools.
+    Handles both direct (TOKEN/USDT) and synthetic (TOKEN/WETH) pairs.
+    """
     mapping = {}
     logger.info(f"建立 CEX-to-DEX map from {len(dex_pools)} DEX 池子...")
     for pool in dex_pools:
         if 'token0' not in pool or 'token1' not in pool:
             continue
-        
-        # --- Temporary Debugging for GNO ---
-        if 'GNO' in pool['token0']['symbol'].upper() or 'GNO' in pool['token1']['symbol'].upper():
-            logger.debug(f"Found GNO pool in build_cex_to_dex_map: {pool}")
-        # --- End Debugging ---
 
+        token0_sym = _normalize_dex_symbol(pool['token0']['symbol'])
+        token1_sym = _normalize_dex_symbol(pool['token1']['symbol'])
+
+        # --- Determine Pair Type ---
         alt_symbol = None
-        is_token0_quote = _normalize_dex_symbol(pool['token0']['symbol']) in TARGET_QUOTE_CURRENCIES
-        is_token1_quote = _normalize_dex_symbol(pool['token1']['symbol']) in TARGET_QUOTE_CURRENCIES
+        quote_symbol = None
+        intermediate_symbol = None
 
-        # Only proceed if one of the tokens is a target quote currency
-        if is_token0_quote and not is_token1_quote:
-            alt_symbol = pool['token1']['symbol']
-            quote_sym = pool['token0']['symbol']
-        elif is_token1_quote and not is_token0_quote:
-            alt_symbol = pool['token0']['symbol']
-            quote_sym = pool['token1']['symbol']
+        is_t0_quote = token0_sym in TARGET_QUOTE_CURRENCIES
+        is_t1_quote = token1_sym in TARGET_QUOTE_CURRENCIES
+        is_t0_weth = token0_sym == 'ETH'
+        is_t1_weth = token1_sym == 'ETH'
+
+        if is_t0_quote and not (is_t1_quote or is_t1_weth):
+            alt_symbol = token1_sym
+            quote_symbol = token0_sym
+        elif is_t1_quote and not (is_t0_quote or is_t0_weth):
+            alt_symbol = token0_sym
+            quote_symbol = token1_sym
+        elif is_t0_weth and not (is_t1_quote or is_t1_weth):
+            alt_symbol = token1_sym
+            intermediate_symbol = 'ETH'
+        elif is_t1_weth and not (is_t0_quote or is_t0_weth):
+            alt_symbol = token0_sym
+            intermediate_symbol = 'ETH'
         else:
-            # This pool is not a direct pair with our target quote currencies (e.g., WETH/GNO), so we skip it for direct mapping.
-            # We could handle WETH pairs separately if needed, but for now, we focus on direct USDT/USDC pairs.
-            continue
+            continue # Skip stable/stable, weth/stable, etc.
 
         if alt_symbol:
-            # Normalize alt_symbol for CEX comparison
-            normalized_alt_symbol = _normalize_dex_symbol(alt_symbol)
+            pool_info = pool.copy() # Create a mutable copy
+            
+            if intermediate_symbol:
+                # This is a synthetic pair (e.g., GNO/WETH)
+                # We create mappings for both USDT and USDC
+                pool_info['is_synthetic'] = True
+                pool_info['intermediate_symbol'] = intermediate_symbol
+                for q_currency in TARGET_QUOTE_CURRENCIES:
+                    cex_symbol = f"{alt_symbol}{q_currency}"
+                    if cex_symbol not in mapping:
+                        mapping[cex_symbol] = []
+                    mapping[cex_symbol].append(pool_info)
+            else:
+                # This is a direct pair (e.g., GNO/USDT)
+                pool_info['is_synthetic'] = False
+                cex_symbol = f"{alt_symbol}{quote_symbol}"
+                if cex_symbol not in mapping:
+                    mapping[cex_symbol] = []
+                mapping[cex_symbol].append(pool_info)
 
-            # Create the CEX symbol key (e.g., GNOUSDT)
-            cex_symbol_concat = f"{normalized_alt_symbol}{quote_sym}"
-            if cex_symbol_concat not in mapping:
-                mapping[cex_symbol_concat] = []
-            mapping[cex_symbol_concat].append(pool)
-    logger.info(f"Map建立成功. 找到 {len(mapping)} 單一的 CEX symbols.")
+    logger.info(f"Map built. Found mappings for {len(mapping)} unique CEX symbols.")
     return mapping
 
 def _normalize_dex_symbol(symbol: str) -> str:
@@ -208,7 +232,7 @@ class AutoDiscoveryEngine:
         if not self._dex_pools:
             return
         self._cex_to_dex_map = build_cex_to_dex_map(self._dex_pools)
-        logger.info(f"Sample CEX-to-DEX map keys: {list(self._cex_to_dex_map.keys())[:5]}")
+        logger.info(f"Sample CEX-to-DEX map keys (只顯示前五個作為範例): {list(self._cex_to_dex_map.keys())[:5]}")
 
         async with aiohttp.ClientSession() as session:
             self.cex_client = BinancePublicClient(self.config.cex.base_url, session, self.scanner_config.concurrency)
@@ -280,48 +304,91 @@ class AutoDiscoveryEngine:
             dex_candidates = self._cex_to_dex_map[spike.symbol]
             for dex_pool in dex_candidates:
                 try:
-                    # --- Correct Token Identification ---
-                    # Identify the quote token first, the other MUST be the base token.
+                    dex_price = None
+                    base_token_details = None
+                    quote_token_details = None
+
                     token0 = dex_pool['token0']
                     token1 = dex_pool['token1']
-                    
-                    if _normalize_dex_symbol(token0['symbol']) in TARGET_QUOTE_CURRENCIES:
-                        quote_token_details = token0
-                        base_token_details = token1
-                    elif _normalize_dex_symbol(token1['symbol']) in TARGET_QUOTE_CURRENCIES:
-                        quote_token_details = token1
-                        base_token_details = token0
+
+                    if dex_pool.get('is_synthetic'):
+                        # --- Handle Synthetic Pair (e.g., GNO/WETH) ---
+                        intermediate_symbol = dex_pool['intermediate_symbol']
+                        
+                        # 1. Identify base and intermediate tokens
+                        if _normalize_dex_symbol(token0['symbol']) == intermediate_symbol:
+                            intermediate_token_details = token0
+                            base_token_details = token1
+                        else:
+                            intermediate_token_details = token1
+                            base_token_details = token0
+                        
+                        # 2. Get CEX price for the intermediate pair (e.g., ETH/USDT)
+                        intermediate_cex_symbol = f"{intermediate_symbol}{spike.quote}"
+                        intermediate_price = await self.cex_client.fetch_ticker_price(intermediate_cex_symbol)
+                        if not intermediate_price:
+                            logger.warning(f"Could not fetch CEX price for intermediate {intermediate_cex_symbol}")
+                            continue
+                        
+                        # 3. Get DEX price for the base/intermediate pair (e.g., GNO/WETH)
+                        pair_dex = MarketPair(
+                            base=_normalize_dex_symbol(base_token_details['symbol']),
+                            quote=intermediate_symbol,
+                            cex_symbol=f"{base_token_details['symbol']}/{intermediate_symbol}",
+                            dex_chain=dex_pool["chain"],
+                            dex_pool_fee=dex_pool["feeTier"],
+                            base_address=base_token_details['address'],
+                            quote_address=intermediate_token_details['address'],
+                            base_decimals=base_token_details.get('decimals', 18),
+                            quote_decimals=intermediate_token_details.get('decimals', 18)
+                        )
+                        probe_size = Decimal(str(self.scanner_config.arbitrage.probe_size_base))
+                        quote_dex = await self.dex_client.get_quote(pair_dex, probe_size, side="sell")
+                        if not quote_dex or not quote_dex.price > 0:
+                            continue
+                        
+                        # 4. Calculate final synthetic price
+                        dex_price = float(quote_dex.price * Decimal(str(intermediate_price)))
+
                     else:
-                        logger.warning(f"Could not identify a quote token in pool {dex_pool['poolAddress']} for {spike.symbol}. Skipping.")
-                        continue
+                        # --- Handle Direct Pair (e.g., GNO/USDT) ---
+                        if _normalize_dex_symbol(token0['symbol']) in TARGET_QUOTE_CURRENCIES:
+                            quote_token_details = token0
+                            base_token_details = token1
+                        else:
+                            quote_token_details = token1
+                            base_token_details = token0
 
-                    pair = MarketPair(
-                        base=_normalize_dex_symbol(base_token_details['symbol']), 
-                        quote=_normalize_dex_symbol(quote_token_details['symbol']), 
-                        symbol=f"{spike.base}/{spike.quote}", 
-                        dex_chain=dex_pool["chain"], 
-                        dex_pool_fee=dex_pool["feeTier"],
-                        base_address=base_token_details['address'],
-                        quote_address=quote_token_details['address'],
-                        base_decimals=base_token_details.get('decimals', 18),
-                        quote_decimals=quote_token_details.get('decimals', 18)
-                    )
-                    probe_size = Decimal(str(self.scanner_config.arbitrage.probe_size_base))
-                    
-                    quote = await self.dex_client.get_quote(pair, probe_size, side="sell")
-                    if not quote or not quote.price > 0:
-                        continue
+                        pair_direct = MarketPair(
+                            base=_normalize_dex_symbol(base_token_details['symbol']), 
+                            quote=_normalize_dex_symbol(quote_token_details['symbol']), 
+                            cex_symbol=f"{spike.base}/{spike.quote}", 
+                            dex_chain=dex_pool["chain"], 
+                            dex_pool_fee=dex_pool["feeTier"],
+                            base_address=base_token_details['address'],
+                            quote_address=quote_token_details['address'],
+                            base_decimals=base_token_details.get('decimals', 18),
+                            quote_decimals=quote_token_details.get('decimals', 18)
+                        )
+                        probe_size = Decimal(str(self.scanner_config.arbitrage.probe_size_base))
+                        quote_direct = await self.dex_client.get_quote(pair_direct, probe_size, side="sell")
+                        if not quote_direct or not quote_direct.price > 0:
+                            continue
+                        dex_price = float(quote_direct.price)
 
-                    dex_price = float(quote.price)
-                    candidate = DexCandidate(
-                        chain=dex_pool["chain"],
-                        protocol=dex_pool["protocol"],
-                        fee=dex_pool["feeTier"],
-                        pool_address=dex_pool["poolAddress"],
-                        dex_price=dex_price
-                    )
-                    opportunity.dex_candidates.append(candidate)
-                    logger.info(f"  -> DEX Candidate on {dex_pool['chain']} ({dex_pool['feeTier']}): Price = {dex_price:.4f}")
+                    # --- Add candidate if price was found ---
+                    if dex_price is not None:
+                        candidate = DexCandidate(
+                            chain=dex_pool["chain"],
+                            protocol=dex_pool["protocol"],
+                            fee=dex_pool["feeTier"],
+                            pool_address=dex_pool["poolAddress"],
+                            dex_price=dex_price,
+                            raw_pool_data=dex_pool,
+                        )
+                        opportunity.dex_candidates.append(candidate)
+                        logger.info(f"  -> DEX Candidate on {dex_pool['chain']} ({dex_pool['feeTier']}): Price = {dex_price:.4f} (Synthetic: {dex_pool.get('is_synthetic', False)})")
+
                 except Exception as e:
                     logger.warning(f"Could not evaluate DEX pool {dex_pool.get('poolAddress')}: {e}", exc_info=True)
             
@@ -329,21 +396,6 @@ class AutoDiscoveryEngine:
                 opportunities.append(opportunity)
 
         return opportunities
-
-    def _normalize_dex_symbol(self, symbol: str) -> str:
-        normalized_symbol = symbol.upper()
-        # Handle stablecoin variants like "USDC.e"
-        if normalized_symbol.startswith("USDC"):
-            return "USDC"
-        if normalized_symbol.startswith("USDT"):
-            return "USDT"
-        
-        normalized_symbol = normalized_symbol.replace('WETH', 'ETH')
-        normalized_symbol = normalized_symbol.replace('WBTC', 'BTC')
-        normalized_symbol = normalized_symbol.replace('WRAPPED ', '')
-        normalized_symbol = normalized_symbol.replace('TOKEN', '')
-        normalized_symbol = normalized_symbol.strip()
-        return normalized_symbol
 
     def _save_opportunities(self, opportunities: List[ArbitrageOpportunity]):
         output_path = Path(self.scanner_config.persist_path)

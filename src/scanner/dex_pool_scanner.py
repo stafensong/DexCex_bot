@@ -14,7 +14,7 @@ SUBGRAPH_URLS = {
     "uniswap_ethereum": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
     "uniswap_polygon": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/3hCPRGZc8s-ZCbhjm",
     "uniswap_base": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/HMuAwufqZ1YCRmzL2SfHTVkzZovC9VL2UAKhjvRqKiR1",
-    "uniswap_arbitrum": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/3V7ZY6muhxaQL5qvntX1CFXJ32W7BxXZTGTwmpH5J4t3",
+    "uniswap_arbitrum": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/HyW7A86UEdYVt5b9Lrw8W2F98yKecerHKutZTRbSCX27",
     "uniswap_bsc": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/8f1KyiuNYiNGrjagzEVpf6k6KkPG517prtjdrJihgHw",
     "pancakeswap_bsc": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/A1fvJWQLBeUAggX2WQTMm3FKjXTekNXo77ZySun4YN2m"
 }
@@ -32,13 +32,15 @@ NATIVE_ASSETS = {
 STABLECOINS = {"USDC", "USDT", "DAI"}
 # Uniswap V3 fee tiers to target (in basis points: 500 = 0.05%, 3000 = 0.3%)
 TARGET_FEE_TIERS = {100, 500, 2500, 3000, 10000} # Expanded for PancakeSwap
+
+# =======以下可以調整過濾參數===========
 # Minimum and maximum Total Value Locked (TVL) in USD
 MIN_TVL_USD = 50_000
 MAX_TVL_USD = 2_000_000
 # Minimum 24-hour trading volume in USD to exclude inactive pools
 MIN_VOLUME_USD = 2_000
 # Number of top pools to fetch from the subgraph (ordered by volume)
-POOL_FETCH_LIMIT = 400
+POOL_FETCH_LIMIT = 1000
 
 # --- Output ---
 OUTPUT_FILENAME = "data/target_pools_Dex.json"
