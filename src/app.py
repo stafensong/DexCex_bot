@@ -81,7 +81,7 @@ class ArbiBotApp:
 
     def _load_discovered_pairs(self, config: AppConfig) -> List[MarketPair]:
         """從 auto_discovery.json 檔案載入動態發現的交易對。"""
-        if not config.scanner.auto_discovery:
+        if not config.scanner or not config.scanner.auto_discovery:
             return []
             
         discovery_path = Path(config.scanner.auto_discovery.persist_path)
@@ -101,7 +101,6 @@ class ArbiBotApp:
                 if not opp.get("dex_candidates"):
                     continue
                 
-                # For simplicity, we take the first valid DEX candidate
                 candidate = opp["dex_candidates"][0]
                 raw_pool = candidate.get("raw_pool_data")
 
@@ -109,16 +108,26 @@ class ArbiBotApp:
                     self.logger.warning(f"Skipping opportunity {opp['symbol']} because raw_pool_data is missing.")
                     continue
 
-                # --- Dynamically identify token details from raw_pool_data ---
+                # --- Correctly identify token details from raw_pool_data ---
                 token0 = raw_pool['token0']
                 token1 = raw_pool['token1']
-
-                # We need to normalize symbols to correctly identify base/quote
-                # This logic should be kept consistent with autodiscovery.py
-                token0_norm_sym = token0['symbol'].upper().replace('WETH', 'ETH')
-                token1_norm_sym = token1['symbol'].upper().replace('WETH', 'ETH')
                 
-                base_details, quote_details = (token0, token1) if token0_norm_sym == opp["base"] else (token1, token0)
+                # Normalize symbols to correctly identify base/quote
+                token0_norm_sym = token0['symbol'].upper().replace('WETH', 'ETH').split('.')[0]
+                token1_norm_sym = token1['symbol'].upper().replace('WETH', 'ETH').split('.')[0]
+                
+                base_details_raw, quote_details_raw = (token0, token1) if token0_norm_sym == opp["base"] else (token1, token0)
+
+                # --- Authoritative Decimal Lookup ---
+                base_token_config = config.tokens.get(opp["base"], {}).get(candidate["chain"])
+                quote_token_config = config.tokens.get(opp["quote"], {}).get(candidate["chain"])
+
+                base_decimals = base_token_config.decimals if base_token_config else base_details_raw.get('decimals', 18)
+                quote_decimals = quote_token_config.decimals if quote_token_config else quote_details_raw.get('decimals', 18)
+                
+                # --- Determine if the pair is synthetic ---
+                is_synthetic = raw_pool.get('is_synthetic', False)
+                intermediate_symbol = raw_pool.get('intermediate_symbol') if is_synthetic else None
 
                 # Load default strategy params from config for dynamic pairs
                 default_params = config.scanner.volume.default_pair_params
@@ -128,10 +137,12 @@ class ArbiBotApp:
                     cex_symbol=opp["symbol"],
                     dex_chain=candidate["chain"],
                     dex_pool_fee=candidate["fee"],
-                    base_address=base_details['address'],
-                    quote_address=quote_details['address'],
-                    base_decimals=base_details.get('decimals', 18),
-                    quote_decimals=quote_details.get('decimals', 18),
+                    base_address=base_details_raw['address'],
+                    quote_address=quote_details_raw['address'],
+                    base_decimals=base_decimals,
+                    quote_decimals=quote_decimals,
+                    is_synthetic=is_synthetic,
+                    intermediate_symbol=intermediate_symbol,
                     base_precision=8, 
                     quote_precision=8,
                     min_edge_bps=default_params.get("min_edge_bps"),

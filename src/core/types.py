@@ -30,6 +30,9 @@ class MarketPair(BaseModel):
     quote_address: Optional[str] = None
     base_decimals: Optional[int] = None
     quote_decimals: Optional[int] = None
+    # --- Optional fields for triangular arbitrage ---
+    is_synthetic: bool = False
+    intermediate_symbol: Optional[str] = None
     # --- Optional fields for strategy parameters ---
     min_edge_bps: Optional[int] = None
     max_slippage_bps: Optional[int] = None

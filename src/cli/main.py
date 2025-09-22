@@ -23,6 +23,14 @@ def autodiscover():
     """
     typer.echo("正在啟動 AutoDiscovery 引擎...")
     uvloop.install()
+    
+    # --- Enable DEBUG Logging ---
+    import sys
+    from loguru import logger
+    logger.remove()
+    logger.add(sys.stdout, level="DEBUG")
+    # --- End DEBUG Logging ---
+
     config = load_config()
     
     async def main():
@@ -93,7 +101,7 @@ def rebalance(paper_run: bool = typer.Option(False, "--paper-run", help="執行�
         pairs = [MarketPair(
             base=p.base,
             quote=p.quote,
-            symbol=p.cex_symbol,
+            cex_symbol=p.cex_symbol,
             dex_chain=p.dex_chain,
             dex_pool_fee=p.dex_pool_fee,
             base_precision=p.base_precision if p.base_precision is not None else 8,

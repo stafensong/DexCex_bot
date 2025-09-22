@@ -25,6 +25,7 @@ class SymbolSnapshot:
     base: str
     quote: str
     status: str
+    permissions: List[str]
 
     @classmethod
     def from_exchange(cls, payload: Dict[str, Any]) -> "SymbolSnapshot":
@@ -33,6 +34,7 @@ class SymbolSnapshot:
             base=payload.get("baseAsset", ""),
             quote=payload.get("quoteAsset", ""),
             status=payload.get("status", ""),
+            permissions=payload.get("permissions", []),
         )
 
 @dataclass
@@ -249,7 +251,28 @@ class AutoDiscoveryEngine:
             return []
         logger.info("掃描CEX以尋找交易量異常的交易對...")
         snapshots = await self.cex_client.fetch_exchange_info()
-        trading_symbols = [s for s in snapshots if s.quote == self.scanner_config.quote_asset and s.status == "TRADING"]
+        
+        # --- Comprehensive Debugging ---
+        logger.debug(f"Fetched {len(snapshots)} total symbols from exchange info.")
+        if snapshots:
+            logger.debug(f"Sample snapshot data: {snapshots[0]}")
+        # --- End Debugging ---
+
+        # Broaden the filter to include all target quote currencies
+        target_quotes = self.scanner_config.target_quote_currencies
+        logger.debug(f"Filtering with target_quotes: {target_quotes}")
+
+        # Corrected Filtering Logic: Exclude non-spot pairs instead of including spot pairs
+        FORBIDDEN_PERMISSIONS = {"MARGIN", "LEVERAGED", "TRD_GRP_002"} # Add other groups if needed
+
+        trading_symbols = [
+            s for s in snapshots 
+            if s.quote in target_quotes
+            and s.status == "TRADING"
+            and not any(p in FORBIDDEN_PERMISSIONS for p in s.permissions)
+        ]
+        logger.debug(f"Found {len(trading_symbols)} SPOT trading symbols with target quote assets.")
+        
         tasks = [self._fetch_and_compute_spike(snap) for snap in trading_symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         spikes: List[VolumeSpike] = []

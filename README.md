@@ -219,3 +219,7 @@ python -m src.cli.main run
                在這個頻率之下，3 (個交易對) × 2 (個請求/交易對) × 20 (次循環/秒) = 120 RPS (每秒請求數)
                Quicknode費率：$212/month (yearly billed) for 125 RPS
                預算關係目前將sleep時間延長到0.2秒，即30 RPS。
+- **偵測器邏輯**: 
+  - 如果 `is_synthetic` 是 `False`：它會執行我們現有的、用於直接套利的雙邊價格比較邏輯。
+  - 如果 `is_synthetic` 是 `True`：它將執行一個全新的三角套利驗證邏輯。它會併發地獲取三個價格：DEX 上的
+         TOKEN/WETH 價格、CEX 上的 ETH/USDT 價格、以及 CEX 上的 TOKEN/USDT

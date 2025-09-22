@@ -32,7 +32,7 @@ class Rebalancer:
         market_pair = MarketPair(
             base=base_asset,
             quote=quote_asset,
-            symbol=pair_config.cex_symbol,
+            cex_symbol=pair_config.cex_symbol,
             dex_chain=pair_config.dex_chain,
             dex_pool_fee=pair_config.dex_pool_fee,
             base_precision=pair_config.base_precision if pair_config.base_precision is not None else 8,

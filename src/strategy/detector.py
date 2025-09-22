@@ -1,6 +1,7 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from decimal import Decimal
 import asyncio
+import time
 
 from loguru import logger
 
@@ -17,10 +18,11 @@ TEN_THOUSAND = Decimal("10000")
 ZERO = Decimal("0")
 
 class OpportunityDetector:
-    def __init__(self, cex_client: CexClient, dex_client: DexClient, pairs: List[PairConfig]):
+    def __init__(self, cex_client: CexClient, dex_client: DexClient, pairs: List[MarketPair]):
         self.cex_client = cex_client
         self.dex_client = dex_client
         self.pairs = pairs
+        self._intermediate_price_cache: Dict[str, Tuple[Decimal, float]] = {}
         logger.info(f"機會偵測器初始化，監控 {len(pairs)} 個交易對。")
 
     async def detect(self) -> List[Opportunity]:
@@ -33,29 +35,22 @@ class OpportunityDetector:
         opportunities = [opp for opp in results if opp]
         return opportunities
 
-    async def check_pair(self, pair_config: PairConfig) -> Optional[Opportunity]:
+    async def check_pair(self, pair: MarketPair) -> Optional[Opportunity]:
         """
-        檢查單一交易對的 CEX 和 DEX 價格，計算潛在機會。
+        Checks a single pair for arbitrage opportunities, handling both direct and synthetic pairs.
         """
-        pair = MarketPair(
-            base=pair_config.base,
-            quote=pair_config.quote,
-            cex_symbol=pair_config.cex_symbol,
-            dex_chain=pair_config.dex_chain,
-            dex_pool_fee=pair_config.dex_pool_fee,
-            base_precision=pair_config.base_precision,
-            quote_precision=pair_config.quote_precision,
-        )
-        
-        # 從 CEX 本地訂單簿獲取報價
+        if pair.is_synthetic:
+            return await self._check_synthetic_pair(pair)
+        else:
+            return await self._check_direct_pair(pair)
+
+    async def _check_direct_pair(self, pair: MarketPair) -> Optional[Opportunity]:
+        """Handles direct TOKEN/QUOTE pairs."""
         cex_quote = await self.cex_client.get_quote(pair)
         if not (cex_quote and cex_quote.bid_price and cex_quote.ask_price):
             return None
 
-        # 假設我們想交易 1 個 base asset (此處應有更智能的數量決定邏輯)
         trade_size = DEFAULT_TRADE_SIZE
-        
-        # 併發獲取 DEX 報價
         dex_buy_task = self.dex_client.get_quote(pair, size=trade_size, side="buy")
         dex_sell_task = self.dex_client.get_quote(pair, size=trade_size, side="sell")
         dex_buy_quote, dex_sell_quote = await asyncio.gather(dex_buy_task, dex_sell_task)
@@ -63,43 +58,97 @@ class OpportunityDetector:
         if not (dex_buy_quote and dex_sell_quote):
             return None
 
-        cex_bid_price = Decimal(cex_quote.bid_price)
-        cex_ask_price = Decimal(cex_quote.ask_price)
-        dex_buy_price = Decimal(dex_buy_quote.price)
-        dex_sell_price = Decimal(dex_sell_quote.price)
+        return self._evaluate_prices(pair, cex_quote.ask_price, cex_quote.bid_price, dex_buy_quote.price, dex_sell_quote.price)
 
-        slippage_bps = Decimal(pair_config.max_slippage_bps)
-        safety_multiplier = Decimal(pair_config.edge_safety_multiplier) if pair_config.edge_safety_multiplier is not None else DEFAULT_SAFETY_MULTIPLIER
-        static_threshold = Decimal(pair_config.min_edge_bps)
+    async def _get_cached_intermediate_price(self, pair_config: MarketPair) -> Optional[Tuple[Decimal, Decimal]]:
+        """Gets the intermediate pair's CEX price, with a 2-second cache."""
+        now = time.time()
+        cached_price, timestamp = self._intermediate_price_cache.get(pair_config.cex_symbol, (None, 0))
+        if now - timestamp < 2 and cached_price:
+            return cached_price
+
+        quote = await self.cex_client.get_quote(pair_config)
+        if not (quote and quote.ask_price and quote.bid_price):
+            return None
+        
+        prices = (quote.ask_price, quote.bid_price)
+        self._intermediate_price_cache[pair_config.cex_symbol] = (prices, now)
+        return prices
+
+    async def _check_synthetic_pair(self, pair: MarketPair) -> Optional[Opportunity]:
+        """Handles synthetic TOKEN/QUOTE pairs (via an intermediate like WETH)."""
+        intermediate_symbol = pair.intermediate_symbol
+        if not intermediate_symbol: return None
+
+        intermediate_cex_pair_symbol = f"{intermediate_symbol}/{pair.quote}"
+        intermediate_cex_pair = next((p for p in self.pairs if p.cex_symbol == intermediate_cex_pair_symbol), None)
+        if not intermediate_cex_pair:
+            logger.warning(f"Cannot check synthetic pair {pair.cex_symbol}: Intermediate pair {intermediate_cex_pair_symbol} not configured.")
+            return None
+
+        # --- Step 1: Fetch prices specific to the pair's chain ---
+        tasks = {
+            "cex_target": self.cex_client.get_quote(pair),
+            "dex_sell": self.dex_client.get_quote(pair, size=DEFAULT_TRADE_SIZE, side="sell"),
+            "dex_buy": self.dex_client.get_quote(pair, size=DEFAULT_TRADE_SIZE, side="buy"),
+        }
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        cex_target_q, dex_sell_q, dex_buy_q = results
+
+        if any(isinstance(r, Exception) for r in results) or not all([cex_target_q, dex_sell_q, dex_buy_q]):
+            logger.debug(f"Could not fetch chain-specific quotes for synthetic pair {pair.cex_symbol}")
+            return None
+
+        # --- Step 2: Fetch the shared intermediate CEX price (with caching) ---
+        intermediate_prices = await self._get_cached_intermediate_price(intermediate_cex_pair)
+        if not intermediate_prices:
+            logger.warning(f"Could not fetch CEX price for intermediate pair {intermediate_cex_pair.cex_symbol}")
+            return None
+        cex_intermediate_ask, cex_intermediate_bid = intermediate_prices
+
+        # --- Step 3: Calculate synthetic prices ---
+        synthetic_dex_sell_price = dex_sell_q.price * cex_intermediate_bid # We sell intermediate on CEX
+        synthetic_dex_buy_price = dex_buy_q.price * cex_intermediate_ask # We buy intermediate on CEX
+
+        return self._evaluate_prices(pair, cex_target_q.ask_price, cex_target_q.bid_price, synthetic_dex_buy_price, synthetic_dex_sell_price)
+
+    def _evaluate_prices(
+        self, 
+        pair: MarketPair, 
+        cex_ask_price: Decimal, 
+        cex_bid_price: Decimal, 
+        dex_buy_price: Decimal, 
+        dex_sell_price: Decimal
+    ) -> Optional[Opportunity]:
+        """Shared logic to evaluate prices and create an opportunity."""
+        slippage_bps = Decimal(pair.max_slippage_bps or 10)
+        safety_multiplier = pair.edge_safety_multiplier if pair.edge_safety_multiplier is not None else DEFAULT_SAFETY_MULTIPLIER
+        static_threshold = Decimal(pair.min_edge_bps or 0)
         dynamic_min_edge = (CEX_TAKER_FEE_BPS + slippage_bps) * safety_multiplier
         effective_min_edge = max(static_threshold, dynamic_min_edge)
 
-        # --- 計算兩個方向的機會 ---
-
-        # 方向 1: 在 CEX 買, 在 DEX 賣 (CEX_to_DEX)
+        # Direction 1: CEX_to_DEX
         edge_bps_1 = (dex_sell_price - cex_ask_price) / cex_ask_price * TEN_THOUSAND
-
         if edge_bps_1 >= effective_min_edge:
             opp = self._create_opportunity(
                 pair=pair, direction="CEX_to_DEX", cex_price=cex_ask_price,
-                dex_price=dex_sell_price, edge_bps=edge_bps_1, pair_config=pair_config,
-                size=trade_size, slippage_bps=slippage_bps
+                dex_price=dex_sell_price, edge_bps=edge_bps_1,
+                size=DEFAULT_TRADE_SIZE, slippage_bps=slippage_bps
             )
             metrics.opportunities_found.labels(pair=pair.cex_symbol, direction="CEX_to_DEX").inc()
             return opp
 
-        # 方向 2: 在 DEX 買, 在 CEX 賣 (DEX_to_CEX)
+        # Direction 2: DEX_to_CEX
         edge_bps_2 = (cex_bid_price - dex_buy_price) / dex_buy_price * TEN_THOUSAND
-
         if edge_bps_2 >= effective_min_edge:
             opp = self._create_opportunity(
                 pair=pair, direction="DEX_to_CEX", cex_price=cex_bid_price,
-                dex_price=dex_buy_price, edge_bps=edge_bps_2, pair_config=pair_config,
-                size=trade_size, slippage_bps=slippage_bps
+                dex_price=dex_buy_price, edge_bps=edge_bps_2,
+                size=DEFAULT_TRADE_SIZE, slippage_bps=slippage_bps
             )
             metrics.opportunities_found.labels(pair=pair.cex_symbol, direction="DEX_to_CEX").inc()
             return opp
-
+            
         return None
 
     def _create_opportunity(
@@ -109,7 +158,6 @@ class OpportunityDetector:
         cex_price: Decimal,
         dex_price: Decimal,
         edge_bps: Decimal,
-        pair_config: PairConfig,
         size: Decimal,
         slippage_bps: Decimal,
     ) -> Opportunity:
