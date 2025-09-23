@@ -29,24 +29,35 @@ class ArbiBotApp:
         self.dashboard_publisher = None
 
         # 1. Load static pairs from config
-        static_pairs = [MarketPair(
-            base=p.base,
-            quote_cex=p.quote,
-            quote_dex=p.quote, # For direct pairs, CEX and DEX quotes are the same
-            cex_symbol=p.cex_symbol,
-            dex_chain=p.dex_chain,
-            dex_pool_fee=p.dex_pool_fee,
-            base_precision=p.base_precision if p.base_precision is not None else 8,
-            quote_precision=p.quote_precision if p.quote_precision is not None else 8,
-            # Copy strategy params from static config
-            min_edge_bps=p.min_edge_bps,
-            max_slippage_bps=p.max_slippage_bps,
-            max_size_quote=p.max_size_quote,
-            price_floor_quote=p.price_floor_quote,
-            price_ceiling_quote=p.price_ceiling_quote,
-            max_edge_bps=p.max_edge_bps,
-            edge_safety_multiplier=p.edge_safety_multiplier,
-        ) for p in config.pairs]
+        static_pairs: List[MarketPair] = []
+        for p in config.pairs:
+            # Authoritative lookup for decimals for static pairs
+            base_token_details = config.tokens.get(p.base, {}).get(p.dex_chain)
+            quote_token_details = config.tokens.get(p.quote, {}).get(p.dex_chain)
+
+            pair = MarketPair(
+                base=p.base,
+                quote_cex=p.quote,
+                quote_dex=p.quote, # For direct pairs, CEX and DEX quotes are the same
+                cex_symbol=p.cex_symbol,
+                dex_chain=p.dex_chain,
+                dex_pool_fee=p.dex_pool_fee,
+                base_address=base_token_details.address if base_token_details else None,
+                quote_address=quote_token_details.address if quote_token_details else None,
+                base_decimals=base_token_details.decimals if base_token_details else None,
+                quote_decimals=quote_token_details.decimals if quote_token_details else None,
+                base_precision=p.base_precision if p.base_precision is not None else 8,
+                quote_precision=p.quote_precision if p.quote_precision is not None else 8,
+                # Copy strategy params from static config
+                min_edge_bps=p.min_edge_bps,
+                max_slippage_bps=p.max_slippage_bps,
+                max_size_quote=p.max_size_quote,
+                price_floor_quote=p.price_floor_quote,
+                price_ceiling_quote=p.price_ceiling_quote,
+                max_edge_bps=p.max_edge_bps,
+                edge_safety_multiplier=p.edge_safety_multiplier,
+            )
+            static_pairs.append(pair)
         
         # 2. Load dynamic pairs from auto-discovery JSON
         dynamic_pairs = self._load_discovered_pairs(config)
