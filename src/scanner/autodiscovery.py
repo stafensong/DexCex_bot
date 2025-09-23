@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 from dataclasses import dataclass, field
@@ -85,7 +86,6 @@ class ArbitrageOpportunity:
 # --- CEX Client ---
 
 class BinancePublicClient:
-    # ... (BinancePublicClient implementation remains the same)
     def __init__(self, base_url: str, session: aiohttp.ClientSession, concurrency: int = 20):
         self.base_url = base_url.rstrip("/")
         self.session = session
@@ -94,9 +94,10 @@ class BinancePublicClient:
     async def fetch_exchange_info(self) -> List[SymbolSnapshot]:
         url = f"{self.base_url}/api/v3/exchangeInfo"
         try:
-            async with self.session.get(url, timeout=10) as response:
-                response.raise_for_status()
-                data = await response.json()
+            async with aiohttp.ClientSession() as temp_session:
+                async with temp_session.get(url, timeout=10) as response:
+                    response.raise_for_status()
+                    data = await response.json()
             return [SymbolSnapshot.from_exchange(item) for item in data.get("symbols", [])]
         except Exception as e:
             logger.error(f"Failed to fetch exchange info: {e}")
@@ -118,12 +119,13 @@ class BinancePublicClient:
     async def fetch_ticker_price(self, symbol: str) -> Optional[float]:
         params = {"symbol": symbol}
         try:
-            async with self.session.get(f"{self.base_url}/api/v3/ticker/price", params=params, timeout=10) as response:
-                if response.status != 200:
-                    logger.warning(f"Failed to get ticker price for {symbol} [{response.status}]")
-                    return None
-                data = await response.json()
-                return float(data.get("price"))
+            async with self.semaphore:
+                async with self.session.get(f"{self.base_url}/api/v3/ticker/price", params=params, timeout=10) as response:
+                    if response.status != 200:
+                        logger.warning(f"Failed to get ticker price for {symbol} [{response.status}]")
+                        return None
+                    data = await response.json()
+                    return float(data.get("price"))
         except Exception as e:
             logger.error(f"Error fetching ticker price for {symbol}: {e}")
             return None
@@ -131,7 +133,7 @@ class BinancePublicClient:
 # --- Core Logic ---
 
 def _normalize_dex_symbol(symbol: str) -> str:
-    normalized_symbol = symbol.upper().split('.')[0] # Handle USDC.e
+    normalized_symbol = symbol.upper().split('.')[0]
     normalized_symbol = normalized_symbol.replace('WETH', 'ETH')
     normalized_symbol = normalized_symbol.replace('WBTC', 'BTC')
     return normalized_symbol.strip()
@@ -140,7 +142,6 @@ def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
     mapping = {}
     logger.info(f"建立 CEX-to-DEX map from {len(dex_pools)} DEX 池子... (使用權威地址驗證)")
     
-    # Create a reverse map from address to official symbol for quick lookups
     address_to_symbol_map: Dict[str, Dict[str, str]] = {}
     for symbol, data in master_token_list.items():
         for chain, address in data.get("addresses", {}).items():
@@ -149,10 +150,6 @@ def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
             address_to_symbol_map[chain][address.lower()] = symbol
 
     for pool in dex_pools:
-        if 'token0' not in pool or 'token1' not in pool:
-            continue
-
-        # --- Address-based Verification ---
         chain = pool.get("chain")
         if not chain or chain not in address_to_symbol_map:
             continue
@@ -167,9 +164,7 @@ def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
             logger.trace(f"Skipping pool {pool.get('poolAddress')} due to unofficial tokens.")
             continue
 
-        # --- Determine Pair Type ---
         alt_symbol, quote_symbol, intermediate_symbol = None, None, None
-
         is_t0_quote = token0_official_sym in TARGET_QUOTE_CURRENCIES
         is_t1_quote = token1_official_sym in TARGET_QUOTE_CURRENCIES
         is_t0_weth = token0_official_sym == 'ETH'
@@ -236,6 +231,7 @@ class AutoDiscoveryEngine:
         self._load_dex_pools()
         self._load_master_token_list()
         if not self._dex_pools or not self._master_token_list:
+            logger.error("缺少 DEX 池或權威代幣清單，無法繼續執行。")
             return
 
         self._cex_to_dex_map = build_cex_to_dex_map(self._dex_pools, self._master_token_list)
