@@ -1,16 +1,21 @@
 import asyncio
 import json
 import time
+import aiohttp
 from decimal import Decimal
-from typing import Optional, Dict
+from typing import Optional, Dict, Literal
+
 
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
+from web3.contract import Contract
 from loguru import logger
 
 from ..core.config import DexConfig, NetworkConfig, SecretsConfig, TokenDetails
-from ..core.types import MarketPair, Quote, DexSwapParams, DexTxReceipt
+from ..core.types import MarketPair, DexQuote, DexSwapParams, DexTxReceipt
 from .dex_base import DexClient
+
+ZERO_DEC = Decimal("0")
 
 # --- ABI 輔助函數 ---
 def _load_abi(path: str) -> Dict:
@@ -45,8 +50,14 @@ class UniV3DexClient(DexClient):
         except Exception:
             self.factory_abi = None
             logger.debug("未載入 Uniswap V3 factory ABI，部分功能將不可用。")
-        self._factory_contracts: Dict[str, 'web3.contract.Contract'] = {}
+        self._factory_contracts: Dict[str, 'Contract'] = {}
         logger.info(f"UniV3DexClient 初始化，地址: {self.user_address}，支援的鏈: {list(self.w3_instances.keys())}")
+
+    def _to_atomic(self, amount: Decimal, decimals: int) -> int:
+        return int(amount * (10**decimals))
+
+    def _from_atomic(self, amount: Decimal, decimals: int) -> Decimal:
+        return amount / (10**decimals)
 
     def _get_w3(self, chain: str) -> Web3:
         if chain not in self.w3_instances:
@@ -125,7 +136,7 @@ class UniV3DexClient(DexClient):
                 token_contract.functions.balanceOf(self.user_address).call
             )
             
-            balance = Decimal(balance_wei) / (10**token_details.decimals)
+            balance = Decimal(balance_wei) / (Decimal(10) ** token_details.decimals)
             logger.debug(f"在 {chain} 上的 {asset} 餘額: {balance}")
             return balance
 
@@ -136,86 +147,100 @@ class UniV3DexClient(DexClient):
             logger.error(f"查詢 {asset} on {chain} 餘額時發生未知錯誤: {e}")
             return Decimal("-1")
 
-    async def get_quote(self, pair: MarketPair, size: Decimal, side: str) -> Optional[Quote]:
-        """
-        使用 Uniswap V3 QuoterV2：
-        - 賣單(sell base)：quoteExactInputSingle（base -> quote）
-        - 買單(buy base)：quoteExactOutputSingle（quote -> base）
-        一律回傳 DEX 價格 = quote per base（便於和 CEX 直接比較）
-        """
-        w3 = self._get_w3(pair.dex_chain)
-        quoter_address = Web3.to_checksum_address(self.dex_config.uniswap_v3[pair.dex_chain].quoter_v2)
-        quoter = w3.eth.contract(address=quoter_address, abi=self.quoter_abi)
-
+    async def get_quote(
+        self, 
+        pair: MarketPair, 
+        size: Decimal, 
+        side: Literal["buy", "sell"],
+        estimate_gas: bool = False
+    ) -> Optional[DexQuote]:
+        """獲取 Uniswap V3 的交易報價。"""
         try:
-            fee = int(pair.dex_pool_fee)
-
-            # --- Token Details Resolution ---
-            # Prioritize dynamically passed details, otherwise fallback to config
-            if pair.base_address and pair.base_decimals is not None:
-                base_addr = pair.base_address
-                base_decimals = pair.base_decimals
+            w3 = self._get_w3(pair.dex_chain)
+            
+            # Prioritize address/decimals from the pair object itself.
+            if pair.base_address and pair.quote_address:
+                base_token = TokenDetails(address=pair.base_address, decimals=pair.base_decimals)
+                quote_token = TokenDetails(address=pair.quote_address, decimals=pair.quote_decimals)
             else:
-                base_details = self._get_token_details(pair.base, pair.dex_chain)
-                base_addr = base_details.address
-                base_decimals = base_details.decimals
+                # Fallback to looking up from the config.
+                base_token = self._get_token_details(pair.base, pair.dex_chain)
+                quote_token = self._get_token_details(pair.quote_dex, pair.dex_chain)
 
-            if pair.quote_address and pair.quote_decimals is not None:
-                quote_addr = pair.quote_address
-                quote_decimals = pair.quote_decimals
-            else:
-                quote_details = self._get_token_details(pair.quote, pair.dex_chain)
-                quote_addr = quote_details.address
-                quote_decimals = quote_details.decimals
-            # --- End Token Details Resolution ---
-
-            if side == 'sell':
-                # ---- 賣 base：exact input ----
-                token_in  = Web3.to_checksum_address(base_addr)
-                token_out = Web3.to_checksum_address(quote_addr)
-                amount_in = int(Decimal(size) * (10 ** base_decimals))
-                if amount_in <= 0: return None
-
-                params_in = (token_in, token_out, int(amount_in), fee, 0)
-                out = await asyncio.to_thread(lambda: quoter.functions.quoteExactInputSingle(params_in).call())
-                amount_out_wei = out[0]
-
-                quote_out = Decimal(amount_out_wei) / (Decimal(10) ** quote_decimals)
-                if size == 0: return None
-                price_q_per_b = quote_out / Decimal(size)
-
-            else: # side == 'buy'
-                # ---- 買 base：exact output ----
-                token_in  = Web3.to_checksum_address(quote_addr)
-                token_out = Web3.to_checksum_address(base_addr)
-                amount_out = int(Decimal(size) * (10 ** base_decimals))
-                if amount_out <= 0: return None
-
-                params_out = (token_in, token_out, int(amount_out), fee, 0)
-                out = await asyncio.to_thread(lambda: quoter.functions.quoteExactOutputSingle(params_out).call())
-                amount_in_wei = out[0]
-
-                quote_in = Decimal(amount_in_wei) / (Decimal(10) ** quote_decimals)
-                if size == 0: return None
-                price_q_per_b = quote_in / Decimal(size)
-
-            # 合理性過濾
-            if not (Decimal("1e-18") < price_q_per_b < Decimal("1e18")):
-                 logger.debug(f"丟棄不合理 DEX 價: {price_q_per_b} ({pair.cex_symbol} on {pair.dex_chain}, side={side})")
-                 return None
-
-            return Quote(
-                pair=pair,
-                side=side,
-                price=price_q_per_b,
-                size=size,
-                venue="DEX",
-                timestamp=time.time(),
-            )
-
-        except Exception as e:
+        except ValueError as e:
             logger.warning(f"獲取 DEX 報價失敗 ({pair.cex_symbol} on {pair.dex_chain}): {e}")
             return None
+
+        try:
+            # === 計算 amountIn 與 tokenIn/Out ===
+            if side == "sell":
+                # 輸入 base，輸出 quote
+                amount_in_atomic = self._to_atomic(size, base_token.decimals)
+                token_in = Web3.to_checksum_address(base_token.address)
+                token_out = Web3.to_checksum_address(quote_token.address)
+            else:
+                # side == "buy"：輸入 quote（花 quote 換 base）
+                amount_in_atomic = self._to_atomic(size, quote_token.decimals)
+                token_in = Web3.to_checksum_address(quote_token.address)
+                token_out = Web3.to_checksum_address(base_token.address)
+
+            fee = int(pair.dex_pool_fee)
+
+            # === QuoterV2 ===
+            quoter_address = Web3.to_checksum_address(self.dex_config.uniswap_v3[pair.dex_chain].quoter_v2)
+            quoter = w3.eth.contract(address=quoter_address, abi=self.quoter_abi)
+
+            # ⚠️ V2 的 quoteExactInputSingle 接受「單一 struct」
+            # 正確順序：(tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
+            params = (token_in, token_out, int(amount_in_atomic), fee, 0)
+
+            # .call() 是同步，放進 to_thread 避免阻塞
+            raw = await asyncio.to_thread(lambda: quoter.functions.quoteExactInputSingle(params).call())
+
+            # 不同 ABI 可能回傳 (amountOut, sqrtPriceX96After, ticks, gas) 或單值 amountOut
+            amount_out_atomic = int(raw[0]) if isinstance(raw, (list, tuple)) else int(raw)
+
+            # === 價格換算（處理小數位） ===
+            if side == "sell":
+                # 輸入 base，輸出 quote => price = quote_out / base_in
+                amount_in_base = Decimal(amount_in_atomic) / (Decimal(10) ** base_token.decimals)
+                amount_out_quote = Decimal(amount_out_atomic) / (Decimal(10) ** quote_token.decimals)
+                price = (amount_out_quote / amount_in_base) if amount_in_base > 0 else ZERO_DEC
+            else:
+                # 輸入 quote，輸出 base => price = quote_in / base_out
+                amount_in_quote = Decimal(amount_in_atomic) / (Decimal(10) ** quote_token.decimals)
+                amount_out_base = Decimal(amount_out_atomic) / (Decimal(10) ** base_token.decimals)
+                price = (amount_in_quote / amount_out_base) if amount_out_base > 0 else ZERO_DEC
+
+            gas_cost_quote = ZERO_DEC
+
+            if estimate_gas:
+                gas_estimate = 200_000  # 粗估
+                gas_price_wei = await asyncio.to_thread(lambda: w3.eth.gas_price)
+                # 回傳的是 native token 的花費（例如 ETH）；目前先以 USD 表示
+                native_token_price_usd = await self._get_native_token_price_usd(pair.dex_chain)
+                gas_cost_native = w3.from_wei(gas_estimate * gas_price_wei, 'ether')
+                gas_cost_quote = Decimal(str(gas_cost_native)) * Decimal(str(native_token_price_usd))
+
+            return DexQuote(price=price, gas_cost_quote=gas_cost_quote)
+
+        except Exception as e:
+            logger.warning(f"從 QuoterV2 獲取報價時發生錯誤 ({pair.cex_symbol} on {pair.dex_chain}): {e}")
+            return None
+
+    async def _get_native_token_price_usd(self, chain: str) -> Decimal:
+        try:
+            if chain in ['ethereum', 'arbitrum', 'base']:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
+                        timeout=8
+                    ) as response:
+                        data = await response.json()
+                        return Decimal(str(data['ethereum']['usd']))
+        except Exception as _:
+            pass
+        return Decimal("3000")
 
     async def _approve_token(self, w3: Web3, token_address: str, router_address: str, required_amount: int):
         token_contract = w3.eth.contract(address=token_address, abi=self.erc20_abi)
@@ -234,7 +259,7 @@ class UniV3DexClient(DexClient):
         tx_params = {
             'from': self.user_address,
             'nonce': nonce,
-            'gasPrice': await asyncio.to_thread(w3.eth.get_gas_price),
+            'gasPrice': await asyncio.to_thread(lambda: w3.eth.gas_price),
         }
         
         approve_tx = await asyncio.to_thread(
@@ -282,7 +307,7 @@ class UniV3DexClient(DexClient):
         tx_params = {
             'from': self.user_address,
             'nonce': nonce,
-            'gasPrice': await asyncio.to_thread(w3.eth.get_gas_price),
+            'gasPrice': await asyncio.to_thread(lambda: w3.eth.gas_price),
         }
         tx_params['gas'] = await asyncio.to_thread(router_contract.functions.exactInputSingle(swap_params_struct).estimate_gas, {'from': self.user_address, 'value': 0})
 

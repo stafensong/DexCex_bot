@@ -46,5 +46,5 @@ def setup_logging(config: ObservabilityConfig):
     # 為了在開發時有更好的可讀性，暫時使用標準格式
     logger.add(sys.stdout, level=log_level)
 
-    logger.info(f"日誌系統已設定，級別: {log_level}")
+    # logger.info(f"日誌系統已設定，級別: {log_level}")
     return logger

@@ -1,48 +1,73 @@
+import json
+from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from loguru import logger
-from ..core.config import RiskConfig
-from ..core.types import Opportunity, ExecutionSummary
-from ..infra.storage import load_state, save_state
+
+from src.core.config import RiskConfig
+from src.core.types import Opportunity, ExecutionSummary
+
+STATE_FILE = Path("data/risk_state.json")
+
+def get_current_date_str() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 class RiskManager:
     def __init__(self, config: RiskConfig):
         self.config = config
-        # 從檔案載入初始狀態
-        initial_state = load_state()
-        self.positions = initial_state.get("positions", {}) # e.g., {"ETH": 0.5}
-        self.daily_pnl = Decimal(str(initial_state.get("daily_pnl", "0.0")))
-        logger.info(f"風險管理器初始化，當前部位: {self.positions}, 今日 PnL: {self.daily_pnl}")
+        self.positions: dict = {}
+        self.daily_pnl: Decimal = Decimal("0")
+        self._load_state()
+        logger.info(f"風險管理器初始化，今日 PnL: {self.daily_pnl:.4f}")
+
+    def _load_state(self):
+        if not STATE_FILE.exists():
+            logger.warning("找不到風險狀態檔案，將以全新狀態啟動。")
+            return
+        try:
+            with STATE_FILE.open("r") as f:
+                state = json.load(f)
+            
+            if state.get("date") == get_current_date_str():
+                self.daily_pnl = Decimal(str(state.get("daily_pnl", "0")))
+                logger.info(f"成功載入今日風險狀態。")
+            else:
+                logger.info("偵測到為新的一天，重置每日 PnL。")
+                self.daily_pnl = Decimal("0")
+
+            self.positions = state.get("positions", {})
+
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(f"讀取風險狀態檔案時發生錯誤: {e}，將以全新狀態啟動。")
+            self.daily_pnl = Decimal("0")
+            self.positions = {}
+
+    def _save_state(self):
+        current_state = {
+            "date": get_current_date_str(),
+            "daily_pnl": float(self.daily_pnl),
+            "positions": self.positions,
+        }
+        try:
+            STATE_FILE.parent.mkdir(exist_ok=True)
+            with STATE_FILE.open("w") as f:
+                json.dump(current_state, f, indent=2)
+        except Exception as e:
+            logger.error(f"儲存風險狀態時發生錯誤: {e}")
 
     def is_trade_allowed(self, opp: Opportunity) -> bool:
-        """
-        在執行前檢查交易是否符合風險限制。
-        """
-        # 1. 檢查單筆名義額度
         notional_value = opp.cex_price * opp.size
         if notional_value > self.config.max_notional_per_leg_quote:
             logger.warning(f"交易被拒: 超出單筆名義額度限制 ({notional_value:.2f} > {self.config.max_notional_per_leg_quote:.2f})。")
             return False
-
-        # TODO: 增加更詳細的部位檢查
         return True
 
     def update_state(self, summary: ExecutionSummary):
-        """
-        根據交易執行結果更新風險狀態，並將其持久化。
-        """
-        # Only aggregate PnL for trades that were actually executed.
         if not summary.legs:
             return
 
         if summary.pnl_quote is not None:
             self.daily_pnl += summary.pnl_quote
             logger.info(f"每日 PnL 更新: {self.daily_pnl:.4f}")
-
-        # TODO: 根據 summary.legs 中的具體成交情況，更新詳細的 CEX/DEX 部位
         
-        # 將更新後的狀態保存到檔案
-        current_state = {
-            "positions": self.positions,
-            "daily_pnl": float(self.daily_pnl) # JSON 序列化前轉為 float
-        }
-        save_state(current_state)
+        self._save_state()

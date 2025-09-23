@@ -100,7 +100,8 @@ def rebalance(paper_run: bool = typer.Option(False, "--paper-run", help="執行�
         # 為再平衡任務建立專用的 CEX 客戶端
         pairs = [MarketPair(
             base=p.base,
-            quote=p.quote,
+            quote_cex=p.quote,
+            quote_dex=p.quote, # Rebalancing is CEX-only, so they are the same
             cex_symbol=p.cex_symbol,
             dex_chain=p.dex_chain,
             dex_pool_fee=p.dex_pool_fee,

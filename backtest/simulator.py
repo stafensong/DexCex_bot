@@ -96,8 +96,9 @@ class Simulator:
         self.pair_config = self.config.pairs[0]
         self.market_pair = MarketPair(
             base=self.pair_config.base, 
-            quote=self.pair_config.quote, 
-            symbol=self.pair_config.cex_symbol,
+            quote_cex=self.pair_config.quote, 
+            quote_dex=self.pair_config.quote, # Backtest assumes direct pairs
+            cex_symbol=self.pair_config.cex_symbol,
             dex_chain=self.pair_config.dex_chain,
             dex_pool_fee=self.pair_config.dex_pool_fee,
             base_precision=self.pair_config.base_precision if self.pair_config.base_precision is not None else 8,
@@ -109,7 +110,7 @@ class Simulator:
         self.dex_client = BacktestDexClient(self.market_pair)
 
         # 初始化策略組件
-        self.detector = OpportunityDetector(self.cex_client, self.dex_client, [self.pair_config])
+        self.detector = OpportunityDetector(self.config.strategy, self.cex_client, self.dex_client, [self.market_pair])
         self.router = SimpleRouter()
         self.risk_manager = RiskManager(self.config.risk)
         self.executor = TransactionExecutor(self.cex_client, self.dex_client, self.risk_manager)

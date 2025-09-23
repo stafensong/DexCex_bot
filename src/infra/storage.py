@@ -18,7 +18,7 @@ def load_state() -> Dict[str, Any]:
     try:
         with open(STATE_FILE_PATH, 'rb') as f:
             state = orjson.loads(f.read())
-            logger.info(f"已從 {STATE_FILE_PATH} 載入先前狀態。")
+            # logger.info(f"已從 {STATE_FILE_PATH} 載入先前狀態。")
             return state
     except FileNotFoundError:
         logger.warning(f"狀態檔案 {STATE_FILE_PATH} 未找到，將使用初始狀態。")

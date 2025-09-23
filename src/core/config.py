@@ -184,6 +184,11 @@ class ScannerConfig(BaseModel):
     auto_discovery: Optional[AutoDiscoveryConfig] = None
 
 
+class StrategyConfig(BaseModel):
+    target_notional_usd: int = 10
+    min_edge_bps: int
+    max_slippage_bps: int
+
 class PairConfig(BaseModel):
     base: str
     quote: str
@@ -234,6 +239,7 @@ class AppConfig(BaseModel):
     inventory: InventoryConfig
     observability: ObservabilityConfig
     dashboard: DashboardConfig
+    strategy: StrategyConfig
     pairs: List[PairConfig]
     tokens: Dict[str, Dict[str, TokenDetails]]
     secrets: SecretsConfig = Field(default_factory=SecretsConfig.load)

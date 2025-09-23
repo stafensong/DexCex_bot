@@ -4,6 +4,8 @@ from decimal import Decimal
 from pydantic import BaseModel
 from dataclasses import dataclass
 
+ZERO = Decimal("0")
+
 __all__ = [
     "MarketPair",
     "Quote",
@@ -20,7 +22,8 @@ __all__ = [
 
 class MarketPair(BaseModel):
     base: str
-    quote: str
+    quote_cex: str  # The quote currency for CEX and user-facing representation (e.g., USDT)
+    quote_dex: str  # The quote currency on the DEX (e.g., WETH for synthetic pairs)
     cex_symbol: str  # e.g., "ETHUSDT"
     dex_chain: str
     dex_pool_fee: int
@@ -28,9 +31,9 @@ class MarketPair(BaseModel):
     quote_precision: int = 8
     # --- Optional fields for dynamically discovered pairs ---
     base_address: Optional[str] = None
-    quote_address: Optional[str] = None
+    quote_address: Optional[str] = None # This address corresponds to quote_dex
     base_decimals: Optional[int] = None
-    quote_decimals: Optional[int] = None
+    quote_decimals: Optional[int] = None # These decimals correspond to quote_dex
     # --- Optional fields for triangular arbitrage ---
     is_synthetic: bool = False
     intermediate_symbol: Optional[str] = None
@@ -135,3 +138,9 @@ class CexQuote:
     bid_price: Decimal
     ask_price: Decimal
     ts: float
+
+@dataclass
+class DexQuote:
+    price: Decimal
+    gas_cost_quote: Decimal = ZERO
+    gas_cost_quote: Decimal = ZERO

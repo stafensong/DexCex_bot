@@ -356,7 +356,8 @@ class AutoDiscoveryEngine:
                         # 3. Get DEX price for the base/intermediate pair (e.g., GNO/WETH)
                         pair_dex = MarketPair(
                             base=_normalize_dex_symbol(base_token_details['symbol']),
-                            quote=intermediate_symbol,
+                            quote_cex=spike.quote, # Final quote is USDT/USDC
+                            quote_dex=intermediate_symbol, # On-chain quote is WETH
                             cex_symbol=f"{base_token_details['symbol']}/{intermediate_symbol}",
                             dex_chain=dex_pool["chain"],
                             dex_pool_fee=dex_pool["feeTier"],
@@ -384,7 +385,8 @@ class AutoDiscoveryEngine:
 
                         pair_direct = MarketPair(
                             base=_normalize_dex_symbol(base_token_details['symbol']), 
-                            quote=_normalize_dex_symbol(quote_token_details['symbol']), 
+                            quote_cex=_normalize_dex_symbol(quote_token_details['symbol']), 
+                            quote_dex=_normalize_dex_symbol(quote_token_details['symbol']), # Direct pair, so they are the same
                             cex_symbol=f"{spike.base}/{spike.quote}", 
                             dex_chain=dex_pool["chain"], 
                             dex_pool_fee=dex_pool["feeTier"],

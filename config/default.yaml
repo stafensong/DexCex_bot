@@ -51,7 +51,14 @@ cex:
   api_key_env: "BINANCE_API_KEY"
   api_secret_env: "BINANCE_API_SECRET"
   recv_window_ms: 5000
-  # 在 src/strategy/detector.py:13 定義 7.5 bps taker 費 (0.075%)
+  # 策略設定
+strategy:
+  # The target notional size in USD for each trade.
+  target_notional_usd: 10
+  # The minimum edge in basis points (bps) required to trigger a trade.
+  min_edge_bps: 5
+  # The maximum slippage in basis points (bps) allowed for a trade.
+  max_slippage_bps: 15
 
 # CEX 設定 (testnet)
 # cex:

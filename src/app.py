@@ -31,7 +31,8 @@ class ArbiBotApp:
         # 1. Load static pairs from config
         static_pairs = [MarketPair(
             base=p.base,
-            quote=p.quote,
+            quote_cex=p.quote,
+            quote_dex=p.quote, # For direct pairs, CEX and DEX quotes are the same
             cex_symbol=p.cex_symbol,
             dex_chain=p.dex_chain,
             dex_pool_fee=p.dex_pool_fee,
@@ -69,7 +70,7 @@ class ArbiBotApp:
         self.cex_client = BinanceCexClient(config.cex, config.secrets, pairs, dashboard_publisher=self.dashboard_publisher)
         self.dex_client = UniV3DexClient(config.dex, config.network, config.secrets, config.tokens)
         self.risk_manager = RiskManager(config.risk)
-        self.detector = OpportunityDetector(self.cex_client, self.dex_client, pairs)
+        self.detector = OpportunityDetector(config.strategy, self.cex_client, self.dex_client, pairs)
         self.router = SimpleRouter()
         
         # 根據模式選擇執行器
@@ -126,18 +127,21 @@ class ArbiBotApp:
                 if is_synthetic:
                     base_decimals = base_details_raw.get('decimals', 18)
                     quote_decimals = quote_details_raw.get('decimals', 18) # This is the intermediate token's decimals
+                    quote_dex = intermediate_symbol
                 else:
                     # For direct pairs, we can use the authoritative lookup.
                     base_token_config = config.tokens.get(opp["base"], {}).get(candidate["chain"])
                     quote_token_config = config.tokens.get(opp["quote"], {}).get(candidate["chain"])
                     base_decimals = base_token_config.decimals if base_token_config else base_details_raw.get('decimals', 18)
                     quote_decimals = quote_token_config.decimals if quote_token_config else quote_details_raw.get('decimals', 18)
+                    quote_dex = opp["quote"]
 
                 # Load default strategy params from config for dynamic pairs
                 default_params = config.scanner.volume.default_pair_params
                 pair = MarketPair(
                     base=opp["base"],
-                    quote=opp["quote"],
+                    quote_cex=opp["quote"],
+                    quote_dex=quote_dex,
                     cex_symbol=opp["symbol"],
                     dex_chain=candidate["chain"],
                     dex_pool_fee=candidate["fee"],

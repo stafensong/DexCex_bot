@@ -20,18 +20,17 @@ class Rebalancer:
 
         logger.info("開始檢查 CEX 資產庫存比例...")
         
-        # 以第一個交易對作為參考來進行再平衡
-        # TODO: 應能處理更複雜的多幣種再平衡策略
         if not self.pairs_config:
             logger.warning("沒有設定任何交易對，無法執行再平衡。")
             return
         
         pair_config = list(self.pairs_config.values())[0]
         base_asset = pair_config.base
-        quote_asset = pair_config.quote
+        quote_asset = pair_config.quote_cex # Use the CEX quote symbol
         market_pair = MarketPair(
             base=base_asset,
-            quote=quote_asset,
+            quote_cex=quote_asset,
+            quote_dex=quote_asset, # Rebalancing happens on CEX, so they are the same
             cex_symbol=pair_config.cex_symbol,
             dex_chain=pair_config.dex_chain,
             dex_pool_fee=pair_config.dex_pool_fee,
