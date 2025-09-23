@@ -1,28 +1,28 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from decimal import Decimal
 import asyncio
 import time
 
 from loguru import logger
 
-from ..core.config import PairConfig
-from ..core.types import Opportunity, MarketPair
-from ..exchange.cex_base import CexClient
-from ..exchange.dex_base import DexClient
-from ..infra import metrics
+from src.core.types import MarketPair, Opportunity, CexQuote
+from src.exchange.cex_base import CexClient
+from src.exchange.dex_base import DexClient
+from src.infra.metrics import opportunities_found
 
-CEX_TAKER_FEE_BPS = Decimal("7.5")
+# --- Constants ---
+TEN_THOUSAND = Decimal(10000)
+ZERO = Decimal(0)
+CEX_TAKER_FEE_BPS = Decimal(7.5) # Example: 0.075%
+DEFAULT_TRADE_SIZE = Decimal("0.1") # Example trade size
 DEFAULT_SAFETY_MULTIPLIER = Decimal("1.2")
-DEFAULT_TRADE_SIZE = Decimal("0.1")
-TEN_THOUSAND = Decimal("10000")
-ZERO = Decimal("0")
 
 class OpportunityDetector:
     def __init__(self, cex_client: CexClient, dex_client: DexClient, pairs: List[MarketPair]):
         self.cex_client = cex_client
         self.dex_client = dex_client
         self.pairs = pairs
-        self._intermediate_price_cache: Dict[str, Tuple[Decimal, float]] = {}
+        self._intermediate_price_cache: Dict[str, Tuple[Tuple[Decimal, Decimal], float]] = {}
         logger.info(f"機會偵測器初始化，監控 {len(pairs)} 個交易對。")
 
     async def detect(self) -> List[Opportunity]:
@@ -63,14 +63,16 @@ class OpportunityDetector:
     async def _get_cached_intermediate_price(self, pair_config: MarketPair) -> Optional[Tuple[Decimal, Decimal]]:
         """Gets the intermediate pair's CEX price, with a 2-second cache."""
         now = time.time()
-        cached_price, timestamp = self._intermediate_price_cache.get(pair_config.cex_symbol, (None, 0))
-        if now - timestamp < 2 and cached_price:
-            return cached_price
+        record = self._intermediate_price_cache.get(pair_config.cex_symbol)
+        if record:
+            (cached_ask, cached_bid), ts = record
+            if now - ts < 2:
+                return (cached_ask, cached_bid)
 
         quote = await self.cex_client.get_quote(pair_config)
         if not (quote and quote.ask_price and quote.bid_price):
             return None
-        
+
         prices = (quote.ask_price, quote.bid_price)
         self._intermediate_price_cache[pair_config.cex_symbol] = (prices, now)
         return prices
@@ -106,11 +108,30 @@ class OpportunityDetector:
             return None
         cex_intermediate_ask, cex_intermediate_bid = intermediate_prices
 
-        # --- Step 3: Calculate synthetic prices ---
-        synthetic_dex_sell_price = dex_sell_q.price * cex_intermediate_bid # We sell intermediate on CEX
-        synthetic_dex_buy_price = dex_buy_q.price * cex_intermediate_ask # We buy intermediate on CEX
+        # --- Step 3: Sanity check prices and calculate synthetic prices ---
+        if dex_sell_q.price <= 0 or dex_buy_q.price <= 0 or cex_intermediate_ask <= 0 or cex_intermediate_bid <= 0:
+            logger.debug(f"Invalid quotes for synthetic pair {pair.cex_symbol}")
+            return None
 
-        return self._evaluate_prices(pair, cex_target_q.ask_price, cex_target_q.bid_price, synthetic_dex_buy_price, synthetic_dex_sell_price)
+        synthetic_dex_sell_price = dex_sell_q.price * cex_intermediate_bid
+        synthetic_dex_buy_price  = dex_buy_q.price  * cex_intermediate_ask
+
+        # --- Step 4: Check for abnormal edge to prevent pollution ---
+        def _bounded_bps(n: Decimal) -> bool:
+            return abs(n) <= Decimal(100_000)  # 1000% edge limit
+
+        edge_1 = (synthetic_dex_sell_price - cex_target_q.ask_price) / cex_target_q.ask_price * TEN_THOUSAND
+        edge_2 = (cex_target_q.bid_price - synthetic_dex_buy_price) / synthetic_dex_buy_price * TEN_THOUSAND
+
+        if not (_bounded_bps(edge_1) and _bounded_bps(edge_2)):
+            logger.warning(f"Abnormal edge for {pair.cex_symbol}: edge1={edge_1:.2f}, edge2={edge_2:.2f}. Skip.")
+            return None
+
+        return self._evaluate_prices(
+            pair, 
+            cex_target_q.ask_price, cex_target_q.bid_price, 
+            synthetic_dex_buy_price, synthetic_dex_buy_price
+        )
 
     def _evaluate_prices(
         self, 
@@ -121,6 +142,13 @@ class OpportunityDetector:
         dex_sell_price: Decimal
     ) -> Optional[Opportunity]:
         """Shared logic to evaluate prices and create an opportunity."""
+        # Sanity check all incoming prices
+        for v_name, v in [("cex_ask_price", cex_ask_price), ("cex_bid_price", cex_bid_price),
+                          ("dex_buy_price", dex_buy_price), ("dex_sell_price", dex_sell_price)]:
+            if v is None or v <= 0:
+                logger.debug(f"Invalid {v_name} for {pair.cex_symbol} in evaluation")
+                return None
+
         slippage_bps = Decimal(pair.max_slippage_bps or 10)
         safety_multiplier = pair.edge_safety_multiplier if pair.edge_safety_multiplier is not None else DEFAULT_SAFETY_MULTIPLIER
         static_threshold = Decimal(pair.min_edge_bps or 0)
@@ -135,7 +163,7 @@ class OpportunityDetector:
                 dex_price=dex_sell_price, edge_bps=edge_bps_1,
                 size=DEFAULT_TRADE_SIZE, slippage_bps=slippage_bps
             )
-            metrics.opportunities_found.labels(pair=pair.cex_symbol, direction="CEX_to_DEX").inc()
+            opportunities_found.labels(pair=pair.cex_symbol, direction="CEX_to_DEX").inc()
             return opp
 
         # Direction 2: DEX_to_CEX
@@ -146,7 +174,7 @@ class OpportunityDetector:
                 dex_price=dex_buy_price, edge_bps=edge_bps_2,
                 size=DEFAULT_TRADE_SIZE, slippage_bps=slippage_bps
             )
-            metrics.opportunities_found.labels(pair=pair.cex_symbol, direction="DEX_to_CEX").inc()
+            opportunities_found.labels(pair=pair.cex_symbol, direction="DEX_to_CEX").inc()
             return opp
             
         return None

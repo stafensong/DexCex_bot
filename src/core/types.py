@@ -1,7 +1,8 @@
 from __future__ import annotations
-from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
 from decimal import Decimal
-from typing import Literal, Optional, List
+from pydantic import BaseModel
+from dataclasses import dataclass
 
 __all__ = [
     "MarketPair",
@@ -128,3 +129,9 @@ class ExecutionSummary(BaseModel):
     hedged: bool
     started_ts: float
     completed_ts: float
+
+@dataclass
+class CexQuote:
+    bid_price: Decimal
+    ask_price: Decimal
+    ts: float

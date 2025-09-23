@@ -225,23 +225,9 @@ class PaperExecutor:
         legs, pnl_quote, edge_bps, error = evaluate_opportunity(opp, thresholds)
         if error:
             logger.warning(
-                "[PAPER MODE] 機會被拒絕: pair=%s direction=%s reason=%s",
-                opp.pair.cex_symbol,
-                opp.direction,
-                error,
+                f"[PAPER MODE] Opportunity failed sanity check: pair={opp.pair.cex_symbol} direction={opp.direction} reason={error}"
             )
-            return ExecutionSummary(
-                pair=opp.pair,
-                direction=opp.direction,
-                size=opp.size,
-                legs=[],
-                gas_quote=ZERO,
-                pnl_quote=ZERO,
-                edge_bps=ZERO,
-                hedged=False,
-                started_ts=start_ts,
-                completed_ts=time.time(),
-            )
+            return self._build_invalid_summary(opp, start_ts)
 
         logger.info(
             "[PAPER MODE] 偵測到機會: {} {} | CEX={:.4f} | DEX={:.4f} | PnL={:.4f}",
@@ -259,6 +245,20 @@ class PaperExecutor:
             gas_quote=opp.gas_cost_quote,
             pnl_quote=pnl_quote,
             edge_bps=edge_bps,
+            hedged=False,
+            started_ts=start_ts,
+            completed_ts=time.time(),
+        )
+
+    def _build_invalid_summary(self, opp: Opportunity, start_ts: float) -> ExecutionSummary:
+        return ExecutionSummary(
+            pair=opp.pair,
+            direction=opp.direction,
+            size=opp.size,
+            legs=[],
+            gas_quote=ZERO,
+            pnl_quote=ZERO,
+            edge_bps=ZERO,
             hedged=False,
             started_ts=start_ts,
             completed_ts=time.time(),

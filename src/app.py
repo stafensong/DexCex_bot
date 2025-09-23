@@ -119,15 +119,19 @@ class ArbiBotApp:
                 base_details_raw, quote_details_raw = (token0, token1) if token0_norm_sym == opp["base"] else (token1, token0)
 
                 # --- Authoritative Decimal Lookup ---
-                base_token_config = config.tokens.get(opp["base"], {}).get(candidate["chain"])
-                quote_token_config = config.tokens.get(opp["quote"], {}).get(candidate["chain"])
-
-                base_decimals = base_token_config.decimals if base_token_config else base_details_raw.get('decimals', 18)
-                quote_decimals = quote_token_config.decimals if quote_token_config else quote_details_raw.get('decimals', 18)
-                
-                # --- Determine if the pair is synthetic ---
                 is_synthetic = raw_pool.get('is_synthetic', False)
                 intermediate_symbol = raw_pool.get('intermediate_symbol') if is_synthetic else None
+
+                # For synthetic pairs, decimals MUST come from the raw pool data to match the on-chain addresses.
+                if is_synthetic:
+                    base_decimals = base_details_raw.get('decimals', 18)
+                    quote_decimals = quote_details_raw.get('decimals', 18) # This is the intermediate token's decimals
+                else:
+                    # For direct pairs, we can use the authoritative lookup.
+                    base_token_config = config.tokens.get(opp["base"], {}).get(candidate["chain"])
+                    quote_token_config = config.tokens.get(opp["quote"], {}).get(candidate["chain"])
+                    base_decimals = base_token_config.decimals if base_token_config else base_details_raw.get('decimals', 18)
+                    quote_decimals = quote_token_config.decimals if quote_token_config else quote_details_raw.get('decimals', 18)
 
                 # Load default strategy params from config for dynamic pairs
                 default_params = config.scanner.volume.default_pair_params

@@ -30,6 +30,10 @@ class RiskManager:
         """
         根據交易執行結果更新風險狀態，並將其持久化。
         """
+        # Only aggregate PnL for trades that were actually executed.
+        if not summary.legs:
+            return
+
         if summary.pnl_quote is not None:
             self.daily_pnl += summary.pnl_quote
             logger.info(f"每日 PnL 更新: {self.daily_pnl:.4f}")
