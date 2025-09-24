@@ -139,7 +139,7 @@ def _normalize_dex_symbol(symbol: str) -> str:
     return normalized_symbol.strip()
 
 def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
-    mapping = {}
+    mapping: Dict[str, Dict[str, List[Any]]] = {}
     logger.info(f"建立 CEX-to-DEX map from {len(dex_pools)} DEX 池子... (使用權威地址驗證)")
     
     address_to_symbol_map: Dict[str, Dict[str, str]] = {}
@@ -188,13 +188,12 @@ def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
                 pool_info['intermediate_symbol'] = intermediate_symbol
                 for q_currency in TARGET_QUOTE_CURRENCIES:
                     cex_symbol = f"{alt_symbol}{q_currency}"
-                    if cex_symbol not in mapping: mapping[cex_symbol] = []
-                    mapping[cex_symbol].append(pool_info)
+                    mapping.setdefault(cex_symbol, {}).setdefault("synthetic", []).append(pool_info)
             else:
                 pool_info['is_synthetic'] = False
-                cex_symbol = f"{alt_symbol}{quote_symbol}"
-                if cex_symbol not in mapping: mapping[cex_symbol] = []
-                mapping[cex_symbol].append(pool_info)
+                for q_currency in TARGET_QUOTE_CURRENCIES:
+                    cex_symbol = f"{alt_symbol}{q_currency}"
+                    mapping.setdefault(cex_symbol, {}).setdefault("direct", []).append(pool_info)
 
     logger.info(f"Map built. Found mappings for {len(mapping)} unique CEX symbols.")
     return mapping
@@ -298,7 +297,10 @@ class AutoDiscoveryEngine:
             logger.success(f"在 DEX map 中找到 {spike.symbol} ! CEX 價格: {cex_price}")
             opportunity = ArbitrageOpportunity(symbol=spike.symbol, base=spike.base, quote=spike.quote, ratio=spike.ratio, cex_price=cex_price)
 
-            dex_candidates = self._cex_to_dex_map[spike.symbol]
+            # Correctly combine direct and synthetic candidates
+            candidate_groups = self._cex_to_dex_map[spike.symbol]
+            dex_candidates = candidate_groups.get("direct", []) + candidate_groups.get("synthetic", [])
+
             for dex_pool in dex_candidates:
                 try:
                     dex_price = None
@@ -311,9 +313,15 @@ class AutoDiscoveryEngine:
                         else:
                             intermediate_token_details, base_token_details = token1, token0
                         
-                        intermediate_cex_symbol = f"{intermediate_symbol}{spike.quote}"
-                        intermediate_price = await self.cex_client.fetch_ticker_price(intermediate_cex_symbol)
-                        if not intermediate_price: continue
+                        # Flexible fetching of intermediate CEX price (e.g., ETH/USDC or ETH/USDT)
+                        intermediate_price = await self.cex_client.fetch_ticker_price(f"{intermediate_symbol}{spike.quote}")
+                        if not intermediate_price:
+                            logger.debug(f"Could not fetch primary intermediate price {intermediate_symbol}{spike.quote}, falling back to USDT pair.")
+                            intermediate_price = await self.cex_client.fetch_ticker_price(f"{intermediate_symbol}USDT")
+                        
+                        if not intermediate_price: 
+                            logger.warning(f"Failed to fetch any valid intermediate price for {intermediate_symbol} against stablecoins.")
+                            continue
                         
                         pair_dex = MarketPair(base=_normalize_dex_symbol(base_token_details['symbol']), quote_cex=spike.quote, quote_dex=intermediate_symbol, cex_symbol=f"{base_token_details['symbol']}/{intermediate_symbol}", dex_chain=dex_pool["chain"], dex_pool_fee=dex_pool["feeTier"], base_address=base_token_details['address'], quote_address=intermediate_token_details['address'], base_decimals=base_token_details.get('decimals', 18), quote_decimals=intermediate_token_details.get('decimals', 18))
                         probe_size = Decimal(str(self.scanner_config.arbitrage.probe_size_base))
