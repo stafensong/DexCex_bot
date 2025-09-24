@@ -23,3 +23,15 @@ venv_uniswap_swapper/
 !hot_pools.json
 !token_mapping.json
 !requirements.txt
+
+# Ignore all contents of the data directory used for backtesting
+data/
+!data/.gitkeep
+state.json
+
+# 忽略所有 node_modules
+node_modules/
+
+# 如果有子資料夾 (dashboard/backend, dashboard/frontend) 也會一起忽略
+dashboard/backend/node_modules/
+dashboard/frontend/node_modules/

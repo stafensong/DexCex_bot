@@ -1,0 +1,55 @@
+# 交易對設定
+#
+# base: 基礎貨幣 (例如 ETH)
+# quote: 報價貨幣 (例如 USDT)
+# min_edge_bps: 觸發套利的最小價差 (單位: basis points, 1 bps = 0.01%)
+#               此值應包含 CEX/DEX 手續費、滑點、Gas 成本
+# max_slippage_bps: 願意承受的最大滑點
+# max_size_quote: 單筆交易的最大名義價值 (以報價貨幣計)
+# dex_chain: 此交易對在 DEX 上的鏈
+# dex_pool_fee: Uniswap V3 的池子手續費等級 (e.g., 500 for 0.05%, 3000 for 0.3%)
+pairs:
+  - base: "WETH"
+    quote: "USDT"
+    cex_symbol: "ETH/USDT"
+    min_edge_bps: 3         # 10 bps = 0.1%; 100 bps = 1%; 只套用在「靜態手動設定」的交易對
+    max_slippage_bps: 100   # 10 bps = 0.1%
+    max_size_quote: 5000
+    dex_chain: "ethereum"
+    dex_pool_fee: 500
+    price_floor_quote: 100
+    price_ceiling_quote: 10000
+    max_edge_bps: 50000
+    edge_safety_multiplier: 1.2
+    base_precision: 4         # LOT_SIZE stepSize = 0.0001
+    quote_precision: 2        # PRICE_FILTER tickSize = 0.01
+
+  - base: "WETH"
+    quote: "USDC"
+    cex_symbol: "ETH/USDC"
+    min_edge_bps: 10
+    max_slippage_bps: 5
+    max_size_quote: 5000
+    dex_chain: "ethereum"
+    dex_pool_fee: 500
+    price_floor_quote: 100
+    price_ceiling_quote: 10000
+    max_edge_bps: 50000
+    edge_safety_multiplier: 1.2
+    base_precision: 4
+    quote_precision: 2
+
+  - base: "ARB"
+    quote: "USDT"
+    cex_symbol: "ARB/USDT"
+    min_edge_bps: 15
+    max_slippage_bps: 8
+    max_size_quote: 3000
+    dex_chain: "arbitrum"
+    dex_pool_fee: 3000
+    price_floor_quote: 0.1
+    price_ceiling_quote: 10
+    max_edge_bps: 50000
+    edge_safety_multiplier: 1.2
+    base_precision: 1         # stepSize = 0.1
+    quote_precision: 3        # tickSize = 0.001

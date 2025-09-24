@@ -1,0 +1,99 @@
+# 全局環境: "dev" | "prod"
+env: "dev"
+
+# 網路與 Gas 設定
+network:
+  # RPC URL 將從 .env 文件中讀取
+  default_chain: "base"
+  native_token:
+    ethereum: "ETH"
+    arbitrum: "ETH"
+    bsc: "BNB"
+    base: "ETH"
+  max_pending_seconds: 30       # 一筆 DEX 交易等待打包的最長時間
+  gas_estimation_chain: "base" # 用於估算通用 Gas 成本的鏈
+  # EIP-1559 費用設定
+  priority_fee_gwei: 2.0        # 給礦工的小費
+  max_fee_gwei: 60.0            # 你願意支付的最高總 Gas 費用
+
+# DEX 通用設定
+dex:
+  # 主要 DEX 的合約地址 (以 Ethereum 上的 Uniswap v3 為例)
+  # router是指SwapRouter02
+  uniswap_v3:
+    ethereum:
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+      quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+      weth: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    arbitrum:
+      router: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+      quoter_v2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
+      weth: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    base:
+      router: "0x2626664c2603336E57B271c5C0b26F421741e481"
+      quoter_v2: "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
+      weth: "0x4200000000000000000000000000000000000006"
+      factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+    bsc:
+      router: "0xB971eF87ede563556b2ED4b1C0b0019111Dd85d2"
+      quoter_v2: "0x78D78E420Da98ad378D7799bE8f4AF69033EB077"
+      weth: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"
+      factory: "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7"
+
+# CEX 設定 (mainnet)
+cex:
+  name: "binance"
+  base_url: "https://api.binance.com"
+  ws_url: "wss://stream.binance.com:9443/ws"
+  # API 金鑰將從 .env 文件中讀取
+  api_key_env: "BINANCE_API_KEY"
+  api_secret_env: "BINANCE_API_SECRET"
+  recv_window_ms: 5000
+  # 策略設定
+strategy:
+  # The target notional size in USD for each trade.
+  target_notional_usd: 10
+  # The minimum edge in basis points (bps) required to trigger a trade.
+  min_edge_bps: 5
+  # The maximum slippage in basis points (bps) allowed for a trade.
+  max_slippage_bps: 15
+
+# CEX 設定 (testnet)
+# cex:
+#   name: "binance-testnet"
+#   base_url: "https://testnet.binance.vision"
+#   ws_url: "wss://testnet.binance.vision/ws"
+#   # API 金鑰將從 .env 文件中讀取
+#   api_key_env: "BINANCE_API_KEY"
+#   api_secret_env: "BINANCE_API_SECRET"
+#   recv_window_ms: 5000
+
+# 風險與部位管理
+risk:
+  max_notional_per_leg_quote: 10000  # 單邊交易名義本金上限 (以報價貨幣計)
+  max_position_per_asset: 2.0        # 單一資產 (如 ETH) 的最大庫存量
+  circuit_breaker_bps: 250           # 當實際成交價與預期價差超過 2.5%，觸發熔斷
+  cancel_all_on_start: true          # 啟動時取消所有掛單
+  cancel_all_on_shutdown: true       # 關閉時取消所有掛單
+
+# 庫存再平衡
+inventory:
+  rebalance:
+    enable: true
+    target_ratio: 0.5              # CEX 內基礎資產 vs 報價資產的價值目標比例 (例如 0.5 代表 WETH 和 USDT 價值 1:1)
+    trigger_bps: 500               # 當比例偏離目標超過 5% 時觸發
+    method: "on_cex"               # "on_cex" | "on_dex" | "cross"
+
+# 可觀測性
+observability:
+  metrics_port: 9000
+  log_level: "INFO"
+  # 日誌脫敏，會遮蔽包含這些關鍵字的欄位
+  redact_keys: ["key", "secret", "token", "password", "private_key"]
+
+dashboard:
+  enabled: true
+  redis_url: "redis://localhost:6379/0"
+  channel: "bot_dashboard_channel"
