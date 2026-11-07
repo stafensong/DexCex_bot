@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 
 # Ignore the venv virtual environment folder
+venv/
 venv_uniswap_swapper/
 
 # Ignore macOS system files
@@ -19,7 +20,6 @@ venv_uniswap_swapper/
 *.txt
 *.json
 # To keep specific json or txt files, add a '!' before them
-!target_pools_Dex.json
 !hot_pools.json
 !token_mapping.json
 !requirements.txt
