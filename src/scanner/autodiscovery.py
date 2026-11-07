@@ -16,6 +16,13 @@ from src.exchange.univ3 import UniV3DexClient
 
 # --- Constants ---
 TARGET_QUOTE_CURRENCIES = ["USDT", "USDC"]
+# 官方 WETH。master list 里的 ETH 不是包装以太，不能用来识别 ALT/WETH 池。
+WRAPPED_NATIVE_AS_ETH = {
+    "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "arbitrum": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+    "base": "0x4200000000000000000000000000000000000006",
+    "polygon": "0x7ceb23fd6bc0add59e62ac25578270cff1b9f619",
+}
 MASTER_TOKEN_LIST_PATH = Path("data/master_token_list.json")
 
 # --- Data Structures ---
@@ -138,6 +145,12 @@ def _normalize_dex_symbol(symbol: str) -> str:
     normalized_symbol = normalized_symbol.replace('WBTC', 'BTC')
     return normalized_symbol.strip()
 
+def _official_symbol(chain: str, address: str, address_to_symbol_map: dict) -> Optional[str]:
+    if address == WRAPPED_NATIVE_AS_ETH.get(chain):
+        return "ETH"
+    return address_to_symbol_map.get(chain, {}).get(address)
+
+
 def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
     mapping: Dict[str, Dict[str, List[Any]]] = {}
     logger.info(f"建立 CEX-to-DEX map from {len(dex_pools)} DEX 池子... (使用權威地址驗證)")
@@ -157,8 +170,8 @@ def build_cex_to_dex_map(dex_pools: list, master_token_list: dict) -> dict:
         token0_addr = pool['token0']['address'].lower()
         token1_addr = pool['token1']['address'].lower()
 
-        token0_official_sym = address_to_symbol_map[chain].get(token0_addr)
-        token1_official_sym = address_to_symbol_map[chain].get(token1_addr)
+        token0_official_sym = _official_symbol(chain, token0_addr, address_to_symbol_map)
+        token1_official_sym = _official_symbol(chain, token1_addr, address_to_symbol_map)
 
         if not (token0_official_sym and token1_official_sym):
             logger.trace(f"Skipping pool {pool.get('poolAddress')} due to unofficial tokens.")

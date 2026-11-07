@@ -16,6 +16,7 @@ from ..core.types import MarketPair, DexQuote, DexSwapParams, DexTxReceipt
 from .dex_base import DexClient
 
 ZERO_DEC = Decimal("0")
+QUOTER_CALL_GAS = 1_000_000
 
 # --- ABI 輔助函數 ---
 def _load_abi(path: str) -> Dict:
@@ -42,6 +43,7 @@ class UniV3DexClient(DexClient):
                     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
                 self.w3_instances[chain] = w3
 
+        self._decimals_cache: Dict[str, int] = {}
         self.quoter_abi = _load_abi("ABI/quoter.json")
         self.router_abi = _load_abi("ABI/router.json")
         self.erc20_abi = _load_abi("ABI/erc20.json")
@@ -52,6 +54,28 @@ class UniV3DexClient(DexClient):
             logger.debug("未載入 Uniswap V3 factory ABI，部分功能將不可用。")
         self._factory_contracts: Dict[str, 'Contract'] = {}
         logger.info(f"UniV3DexClient 初始化，地址: {self.user_address}，支援的鏈: {list(self.w3_instances.keys())}")
+
+    def resolve_decimals(self, chain: str, address: str, hinted: Optional[int] = None) -> int:
+        """优先使用 tokens.yaml，其次读链上 decimals()，最后才用调用方给出的默认值。"""
+        checksum = Web3.to_checksum_address(address)
+        for chains in self.tokens_config.values():
+            details = chains.get(chain)
+            if details and details.address.lower() == checksum.lower():
+                return int(details.decimals)
+
+        cache_key = f"{chain}:{checksum.lower()}"
+        cached = self._decimals_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            contract = self._get_w3(chain).eth.contract(address=checksum, abi=self.erc20_abi)
+            value = int(contract.functions.decimals().call())
+        except Exception as exc:
+            value = int(hinted if hinted is not None else 18)
+            logger.debug(f"读取 {checksum} on {chain} decimals 失败，使用 {value}: {exc}")
+        self._decimals_cache[cache_key] = value
+        return value
 
     def _to_atomic(self, amount: Decimal, decimals: int) -> int:
         return int(amount * (10**decimals))
@@ -160,8 +184,14 @@ class UniV3DexClient(DexClient):
             
             # Prioritize address/decimals from the pair object itself.
             if pair.base_address and pair.quote_address:
-                base_token = TokenDetails(address=pair.base_address, decimals=pair.base_decimals)
-                quote_token = TokenDetails(address=pair.quote_address, decimals=pair.quote_decimals)
+                base_decimals, quote_decimals = await asyncio.to_thread(
+                    lambda: (
+                        self.resolve_decimals(pair.dex_chain, pair.base_address, pair.base_decimals),
+                        self.resolve_decimals(pair.dex_chain, pair.quote_address, pair.quote_decimals),
+                    )
+                )
+                base_token = TokenDetails(address=pair.base_address, decimals=base_decimals)
+                quote_token = TokenDetails(address=pair.quote_address, decimals=quote_decimals)
             else:
                 # Fallback to looking up from the config.
                 base_token = self._get_token_details(pair.base, pair.dex_chain)
@@ -195,7 +225,9 @@ class UniV3DexClient(DexClient):
             params = (token_in, token_out, int(amount_in_atomic), fee, 0)
 
             # .call() 是同步，放進 to_thread 避免阻塞
-            raw = await asyncio.to_thread(lambda: quoter.functions.quoteExactInputSingle(params).call())
+            raw = await asyncio.to_thread(
+                lambda: quoter.functions.quoteExactInputSingle(params).call({"gas": QUOTER_CALL_GAS})
+            )
 
             # 不同 ABI 可能回傳 (amountOut, sqrtPriceX96After, ticks, gas) 或單值 amountOut
             amount_out_atomic = int(raw[0]) if isinstance(raw, (list, tuple)) else int(raw)

@@ -12,11 +12,11 @@ from datetime import datetime, timezone
 # Dictionary to hold GraphQL endpoints for different chains/protocols
 SUBGRAPH_URLS = {
     "uniswap_ethereum": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
-    "uniswap_polygon": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/3hCPRGZc8s-ZCbhjm",
-    "uniswap_base": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/HMuAwufqZ1YCRmzL2SfHTVkzZovC9VL2UAKhjvRqKiR1",
-    "uniswap_arbitrum": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/HyW7A86UEdYVt5b9Lrw8W2F98yKecerHKutZTRbSCX27",
-    "uniswap_bsc": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/8f1KyiuNYiNGrjagzEVpf6k6KkPG517prtjdrJihgHw",
-    "pancakeswap_bsc": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/A1fvJWQLBeUAggX2WQTMm3FKjXTekNXo77ZySun4YN2m"
+    "uniswap_polygon": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/3hCPRGf4z88VC5rsBKU5AA9FBBq5nF3jbKJG7VZCbhjm",
+    "uniswap_base": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/GqzP4Xaehti8KSfQmv3ZctFSjnSUYZ4En5NRsiTbvZpz",
+    "uniswap_arbitrum": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/FbCGRftH4a3yZugY7TnbYgPJVEv2LvMT6oF1fxPe9aJM",
+    "uniswap_bsc": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/F85MNzUGYqgSHSHRGgeVMNsdnW1KtZSVgFULumXRZTw2",
+    "pancakeswap_bsc": "https://gateway.thegraph.com/api/13f7bf84262b7aa337d54063d0c6a382/subgraphs/id/Hv1GncLY5docZoGtXjo4kwbTvxm3MAhVZqBZE4sUT9eZ",
 }
 
 # --- Filtering Parameters ---
@@ -71,10 +71,12 @@ def build_graphql_query(limit: int) -> str:
         token0 {{
           id
           symbol
+          decimals
         }}
         token1 {{
           id
           symbol
+          decimals
         }}
       }}
     }}
@@ -95,20 +97,46 @@ async def fetch_pools_from_subgraph(session: aiohttp.ClientSession, chain: str, 
     query = build_graphql_query(POOL_FETCH_LIMIT)
     try:
         async with session.post(url, json={"query": query}) as response:
-            if response.status == 200:
-                data = await response.json()
-                pools = data.get("data", {}).get("pools", [])
-                logging.info(f"Successfully fetched {len(pools)} pools from {chain.capitalize()}.")
-                return pools
-            else:
-                logging.error(f"Error fetching from {chain.capitalize()}: HTTP {response.status} - {await response.text()}")
+            body_text = await response.text()
+            if response.status != 200:
+                logging.error(f"Error fetching from {chain}: HTTP {response.status} - {body_text[:500]}")
                 return []
+            try:
+                payload = json.loads(body_text)
+            except json.JSONDecodeError:
+                logging.error(f"{chain} subgraph returned non-JSON body: {body_text[:500]}")
+                return []
+            errors = payload.get("errors") or []
+            data = payload.get("data") or {}
+            pools = data.get("pools") if isinstance(data, dict) else None
+            if errors or not pools:
+                messages = "; ".join(
+                    err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    for err in errors
+                )
+                logging.error(
+                    f"{chain} subgraph returned {0 if not pools else len(pools)} pools"
+                    + (f": {messages[:500]}" if messages else "")
+                )
+                return []
+            logging.info(f"Successfully fetched {len(pools)} pools from {chain}.")
+            return pools
     except aiohttp.ClientError as e:
         logging.error(f"AIOHTTP client error for {chain.capitalize()}: {e}")
         return []
     except Exception as e:
         logging.error(f"An unexpected error occurred for {chain.capitalize()}: {e}")
         return []
+
+def _format_token(token: dict) -> dict:
+    formatted = {
+        "symbol": token["symbol"],
+        "address": token["id"],
+    }
+    if token.get("decimals") is not None:
+        formatted["decimals"] = int(token["decimals"])
+    return formatted
+
 
 def filter_and_format_pools(pools: list, chain_id: str) -> list:
     """
@@ -160,14 +188,8 @@ def filter_and_format_pools(pools: list, chain_id: str) -> list:
                     "feeTier": int(pool['feeTier']),
                     "tvlUSD": float(pool['totalValueLockedUSD']),
                     "volume24hUSD": float(pool['volumeUSD']),
-                    "token0": {
-                        "symbol": pool['token0']['symbol'],
-                        "address": pool['token0']['id']
-                    },
-                    "token1": {
-                        "symbol": pool['token1']['symbol'],
-                        "address": pool['token1']['id']
-                    }
+                    "token0": _format_token(pool['token0']),
+                    "token1": _format_token(pool['token1']),
                 }
                 filtered_list.append(formatted_pool)
         except (ValueError, TypeError, KeyError) as e:
